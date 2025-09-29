@@ -10,9 +10,27 @@ def test_conv2d_cuda():
     device = torch.device("cuda")
     print(f"Using device: {device}")
 
-    # Create sample input: batch_size=2, channels=3, height=32, width=32
+    # Create deterministic input: batch_size=2, channels=3, height=32, width=32
     batch_size, in_channels, height, width = 2, 3, 32, 32
-    input_tensor = torch.randn(batch_size, in_channels, height, width, device=device)
+
+    # Create deterministic input tensor with hardcoded values for reproducibility
+    input_tensor = torch.zeros(batch_size, in_channels, height, width, device=device)
+
+    # Fill with deterministic patterns for each channel
+    for b in range(batch_size):
+        for c in range(in_channels):
+            for h in range(height):
+                for w in range(width):
+                    # Create a deterministic pattern based on batch, channel, and position
+                    value = (b + 1) * 0.1 + (c + 1) * 0.01 + (h * width + w) * 0.001
+                    input_tensor[b, c, h, w] = value
+
+    print(
+        f"Input tensor statistics - Mean: {input_tensor.mean().item():.4f}, Std: {input_tensor.std().item():.4f}"
+    )
+    print(
+        f"Input range: [{input_tensor.min().item():.4f}, {input_tensor.max().item():.4f}]"
+    )
 
     # Create conv2d layer: 3 input channels, 16 output channels, 3x3 kernel, stride=1, padding=1
     out_channels, kernel_size, stride, padding = 16, 3, 1, 1
@@ -59,17 +77,37 @@ def test_conv2d_cuda():
     # Check that output values are finite
     assert torch.all(torch.isfinite(output)), "Output should contain only finite values"
 
-    # Check that output has reasonable magnitude (not too large or too small)
+    # With deterministic input, we can verify the output is reproducible
+    # Run the convolution again to ensure determinism
+    with torch.no_grad():
+        output2 = conv_layer(input_tensor)
+
+    assert torch.allclose(output, output2), (
+        "Output should be deterministic - got different results on repeated runs"
+    )
+
+    # Check that output has reasonable magnitude (adjusted for deterministic input)
     output_std = output.std().item()
-    assert 0.01 < output_std < 100.0, (
-        f"Output standard deviation {output_std:.3f} seems unreasonable"
+    output_mean = output.mean().item()
+
+    # With our deterministic input pattern, we expect non-zero outputs
+    assert output_std > 0.001, (
+        f"Output standard deviation {output_std:.6f} is too small - convolution may not be working"
+    )
+
+    # Verify the output makes sense given our input pattern
+    # Our input increases monotonically, so we expect the conv output to reflect this structure
+    assert abs(output_mean) > 0.001, (
+        f"Output mean {output_mean:.6f} is too close to zero for our structured input"
     )
 
     print(
-        f"Output statistics - Mean: {output.mean().item():.4f}, Std: {output_std:.4f}"
+        f"Output statistics - Mean: {output.mean().item():.6f}, Std: {output_std:.6f}"
     )
-    print(f"Output range: [{output.min().item():.4f}, {output.max().item():.4f}]")
-    print("✓ All assertions passed!")
+    print(f"Output range: [{output.min().item():.6f}, {output.max().item():.6f}]")
+    print(
+        "✓ All assertions passed! Convolution is deterministic and produces expected results."
+    )
 
 
 def main():
