@@ -1,6 +1,12 @@
 [package]
 name = "candle_conv"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
+candle-core = { version = "0.9.1", features = ["cuda", "cudnn"] }
+candle-nn = { version = "0.9.1", features = ["cuda", "cudnn"] }
+anyhow = "1.0.100"
+
+[features]
+default = []
