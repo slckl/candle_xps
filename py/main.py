@@ -1,30 +1,49 @@
-import torch
-import torch.nn as nn
 import time
 
+import torch
+import torch.nn as nn
 
-def test_conv2d_cuda():
-    """Test conv2d operation on CUDA with timing and assertions."""
-    print("Running PyTorch conv2d test on CUDA...")
 
-    device = torch.device("cuda")
-    print(f"Using device: {device}")
+def test_tensor(dims: tuple[int, int, int, int], device: torch.device) -> torch.Tensor:
+    """Create deterministic test tensor with given dimensions and device.
 
-    # Create deterministic input: batch_size=2, channels=3, height=32, width=32
-    batch_size, in_channels, height, width = 2, 3, 32, 32
+    Args:
+        dims: Tuple of dimensions (batch_size, channels, height, width)
+        device: Torch device to place tensor on
+
+    Returns:
+        torch.Tensor: Deterministic tensor filled with structured pattern
+    """
+    batch_size, channels, height, width = dims
 
     # Create deterministic input tensor with hardcoded values for reproducibility
-    input_tensor = torch.zeros(batch_size, in_channels, height, width, device=device)
+    input_tensor = torch.zeros(batch_size, channels, height, width, device=device)
 
     # Fill with deterministic patterns for each channel
     for b in range(batch_size):
-        for c in range(in_channels):
+        for c in range(channels):
             for h in range(height):
                 for w in range(width):
                     # Create a deterministic pattern based on batch, channel, and position
                     value = (b + 1) * 0.1 + (c + 1) * 0.01 + (h * width + w) * 0.001
                     input_tensor[b, c, h, w] = value
 
+    return input_tensor
+
+
+def test_conv2d_cuda():
+    """Test conv2d operation on CUDA with timing and assertions."""
+    print("Running PyTorch conv2d test on CUDA...")
+
+    # device = torch.device("cpu")
+    device = torch.device("cuda")
+    print(f"Using device: {device}")
+
+    # Create deterministic input: batch_size=2, channels=3, height=32, width=32
+    batch_size, in_channels, height, width = 2, 3, 320, 320
+    dims = (batch_size, in_channels, height, width)
+
+    input_tensor = test_tensor(dims, device)
     print(
         f"Input tensor statistics - Mean: {input_tensor.mean().item():.4f}, Std: {input_tensor.std().item():.4f}"
     )
@@ -35,7 +54,12 @@ def test_conv2d_cuda():
     # Create conv2d layer: 3 input channels, 16 output channels, 3x3 kernel, stride=1, padding=1
     out_channels, kernel_size, stride, padding = 16, 3, 1, 1
     conv_layer = nn.Conv2d(
-        in_channels, out_channels, kernel_size, stride=stride, padding=padding
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride=stride,
+        padding=padding,
+        bias=False,
     ).to(device)
 
     # Warm up GPU
@@ -110,8 +134,37 @@ def test_conv2d_cuda():
     )
 
 
+def just_conv():
+    device = torch.device("cuda")
+    print(f"Using device: {device}")
+
+    # Create deterministic input: batch_size=2, channels=3, height=32, width=32
+    batch_size, in_channels, height, width = 2, 3, 32, 32
+    dims = (batch_size, in_channels, height, width)
+
+    input_tensor = test_tensor(dims, device)
+
+    # Create conv2d layer: 3 input channels, 16 output channels, 3x3 kernel, stride=1, padding=1
+    out_channels, kernel_size, stride, padding = 16, 3, 1, 1
+    conv_layer = nn.Conv2d(
+        in_channels,
+        out_channels,
+        kernel_size,
+        stride=stride,
+        padding=padding,
+        bias=False,
+    ).to(device)
+
+    with torch.no_grad():
+        _ = conv_layer(input_tensor)
+
+    torch.cuda.synchronize()
+    print("All gucci")
+
+
 def main():
     test_conv2d_cuda()
+    # just_conv()
 
 
 if __name__ == "__main__":
