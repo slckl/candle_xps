@@ -42,8 +42,8 @@ fn test_conv2d_cuda() -> Result<()> {
     println!("Running Candle conv2d test on CUDA...");
 
     // Create CUDA device
-    let device = Device::new_cuda(0)?;
-    // let device = Device::Cpu;
+    // let device = Device::new_cuda(0)?;
+    let device = Device::Cpu;
     println!("Using device: {device:?}");
 
     // Create deterministic input: batch_size=2, channels=3, height=32, width=32
@@ -193,8 +193,8 @@ fn test_conv2d_cuda() -> Result<()> {
 }
 
 fn just_conv() -> Result<()> {
-    let device = Device::new_cuda(0)?;
-    // let device = Device::Cpu;
+    // let device = Device::new_cuda(0)?;
+    let device = Device::Cpu;
 
     // Create deterministic input: batch_size=2, channels=3, height=32, width=32
     let (batch_size, in_channels, height, width) = (2, 3, 320, 320);
