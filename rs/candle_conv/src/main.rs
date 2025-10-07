@@ -3,47 +3,12 @@ use candle_core::{DType, Device, Tensor};
 use candle_nn::{Conv2dConfig, Module, VarBuilder, VarMap};
 use std::time::{Duration, Instant};
 
-/// Create deterministic test tensor with given dimensions and device.
-///
-/// # Arguments
-/// * `dims` - Tuple of dimensions (batch_size, channels, height, width)
-/// * `device` - Device to place tensor on
-///
-/// # Returns
-/// * `Result<Tensor>` - Deterministic tensor filled with structured pattern
-fn test_tensor(dims: (usize, usize, usize, usize), device: &Device) -> Result<Tensor> {
-    let (batch_size, channels, height, width) = dims;
-
-    // Create deterministic input tensor with hardcoded values for reproducibility
-    let mut input_data = vec![0.0f32; batch_size * channels * height * width];
-
-    for b in 0..batch_size {
-        for c in 0..channels {
-            for h in 0..height {
-                for w in 0..width {
-                    // Create a deterministic pattern based on batch, channel, and position
-                    let value = (b + 1) as f32 * 0.1
-                        + (c + 1) as f32 * 0.01
-                        + (h * width + w) as f32 * 0.001;
-                    let idx = b * channels * height * width + c * height * width + h * width + w;
-                    input_data[idx] = value;
-                }
-            }
-        }
-    }
-
-    let input_tensor = Tensor::from_vec(input_data, (batch_size, channels, height, width), device)?;
-
-    Ok(input_tensor)
-}
-
 fn just_conv() -> Result<()> {
     // let device = Device::new_cuda(0)?;
     let device = Device::Cpu;
 
     // Create deterministic input: batch_size=2, channels=3, height=32, width=32
     let (batch_size, in_channels, height, width) = (2, 3, 320, 320);
-    // let dims = (batch_size, in_channels, height, width);
 
     // let input_tensor = test_tensor(dims, &device)?;
     let input_tensor = Tensor::from_vec(
