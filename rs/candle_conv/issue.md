@@ -25,7 +25,11 @@ CPU benchmarks are noisy, so run variance is large.
 
 ## Ryzen 5900x
 
-
+| Lib           | Op                | Min     | Max     | Avg     |
+| ------------- | ----------------- | ------- | --------| ------- |
+| Candle 0.9.1  | Conv2d im2col     | 13.9 ms | 17.3 ms | 15.4 ms |
+| Candle 0.9.1  | Conv2d non-im2col | 14.7 ms | 19.0 ms | 16.7 ms |
+| Pytorch 2.8.0 | Conv2d            | 0.6 ms  | 3.7 ms  | 2.0 ms  |
 
 
 # Anatomy of a cpu conv call
