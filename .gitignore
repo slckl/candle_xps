@@ -3,3 +3,4 @@ rs/target
 ncu
 target
 .venv
+*.egg-info/
