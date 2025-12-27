@@ -10,3 +10,4 @@ py/rfdetr/sample.jpg
 py/rfdetr/test.jpg
 py/rfdetr/output.jpg
 py/rfdetr/*.pth
+py/rfdetr/sample.pp.jpg

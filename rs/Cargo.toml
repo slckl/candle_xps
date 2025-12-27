@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "candle_conv",
     "candle_rf_detr",
+    "candle_yolov8",
 ]
 
 [workspace.dependencies]
