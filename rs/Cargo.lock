@@ -388,9 +388,18 @@ dependencies = [
 name = "candle_rf_detr"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "anyhow",
  "candle-core",
  "candle-nn",
+ "candle-transformers",
+ "clap",
+ "hf-hub",
+ "image",
+ "imageproc",
+ "tracing",
+ "tracing-chrome",
+ "tracing-subscriber",
 ]
 
 [[package]]
