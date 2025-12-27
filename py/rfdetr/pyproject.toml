@@ -66,6 +66,7 @@ dependencies = [
     "onnx-graphsurgeon>=0.5.8",
     "onnxscript>=0.5.7",
     "colored>=2.3.1",
+    "safetensors>=0.7.0",
 ]
 
 [project.optional-dependencies]
