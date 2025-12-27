@@ -1,0 +1,14 @@
+[package]
+name = "candle_rf_detr"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# candle-core = { version = "0.9.1", features = [] } # features = ["cuda", "cudnn"] }
+# candle-nn = { version = "0.9.1", features = [] } # ["cuda", "cudnn"] }
+candle-core = { git = "https://github.com/slckl/candle.git", features = ["cuda", "cudnn"] }
+candle-nn = { git = "https://github.com/slckl/candle.git", features = ["cuda", "cudnn"] }
+anyhow = "1.0.100"
+
+[features]
+default = []

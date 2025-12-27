@@ -125,6 +125,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "candle_rf_detr"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "candle-core",
+ "candle-nn",
+]
+
+[[package]]
 name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
