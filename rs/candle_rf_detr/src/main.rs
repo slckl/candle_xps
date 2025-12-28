@@ -11,6 +11,7 @@ extern crate accelerate_src;
 mod coco_classes;
 mod config;
 mod detection;
+mod dino2;
 mod model;
 mod preprocess;
 
@@ -19,7 +20,7 @@ use candle_nn::VarBuilder;
 use clap::{Parser, ValueEnum};
 use image::DynamicImage;
 
-use crate::{config::RfDetrConfig, detection::Detection, model::RfDetr};
+use crate::{config::RfDetrConfig, detection::Detection, model::RfDetr, preprocess::TensorStats};
 
 /// Select the compute device
 pub fn device(cpu: bool) -> Result<Device> {
@@ -186,7 +187,7 @@ fn draw_detections(
 
 /// Run inference on a single image
 fn predict(
-    _model: &RfDetr,
+    model: &RfDetr,
     image_path: &str,
     config: &RfDetrConfig,
     device: &Device,
@@ -202,8 +203,22 @@ fn predict(
     println!("  Batch tensor shape: {:?}", batch_tensor.dims());
     println!("  Original image size: {}x{}", w_orig, h_orig);
 
-    // TODO: Steps 04+: Run through model
-    todo!("Model inference not yet implemented")
+    // Step 04: Run backbone encoder
+    println!("Running backbone encoder...");
+    let encoder_outputs = model.backbone_forward(&batch_tensor)?;
+
+    println!(
+        "  Backbone encoder outputs: {} feature maps",
+        encoder_outputs.len()
+    );
+    for (i, feat) in encoder_outputs.iter().enumerate() {
+        let stats = TensorStats::from_tensor(feat)?;
+        println!("  Output {}: shape={:?}", i, stats.shape);
+        stats.print(&format!("    04_backbone_encoder_output_{}", i));
+    }
+
+    // TODO: Steps 05+: Run through rest of model
+    todo!("Full model inference not yet implemented")
 }
 
 pub fn main() -> anyhow::Result<()> {
