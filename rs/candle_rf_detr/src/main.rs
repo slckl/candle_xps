@@ -19,6 +19,9 @@ use candle_nn::VarBuilder;
 use clap::{Parser, ValueEnum};
 use image::DynamicImage;
 
+use tracing_chrome::ChromeLayerBuilder;
+use tracing_subscriber::prelude::*;
+
 /// Select the compute device
 pub fn device(cpu: bool) -> Result<Device> {
     if cpu {
@@ -283,9 +286,6 @@ fn run_inference(
 }
 
 pub fn main() -> anyhow::Result<()> {
-    use tracing_chrome::ChromeLayerBuilder;
-    use tracing_subscriber::prelude::*;
-
     let args = Args::parse();
 
     // Setup tracing if enabled
@@ -322,6 +322,7 @@ pub fn main() -> anyhow::Result<()> {
     }
 
     let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[model_path], DType::F32, &device)? };
+    println!("Model weights loaded into VarBuilder");
     let model = RFDETR::load(vb, config)?;
     println!("Model loaded successfully");
 

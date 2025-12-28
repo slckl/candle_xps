@@ -503,7 +503,7 @@ impl DINOv2Backbone {
             "embeddings.position_embeddings",
         )?;
 
-        let num_blocks = *config.out_feature_indexes.last().unwrap_or(&12) + 1;
+        let num_blocks = *config.out_feature_indexes.last().unwrap_or(&12); // + 1;
         let mut blocks = Vec::with_capacity(num_blocks);
         for i in 0..num_blocks {
             let block = TransformerEncoderBlock::load(
@@ -515,7 +515,7 @@ impl DINOv2Backbone {
             blocks.push(block);
         }
 
-        let norm = LayerNormWrapper::load(vb.pp("layernorm"), embed_dim, 1e-6)?;
+        let norm = LayerNormWrapper::load(vb.pp("encoder.layernorm"), embed_dim, 1e-6)?;
 
         Ok(Self {
             patch_embed,
@@ -1005,6 +1005,7 @@ pub struct RFDETR {
 impl RFDETR {
     pub fn load(vb: VarBuilder, config: RFDETRConfig) -> Result<Self> {
         let backbone = DINOv2Backbone::load(vb.pp("backbone.0.encoder"), &config)?;
+        println!("Loaded DINOV2 backbone");
 
         let scale_factors = config
             .projector_scales
