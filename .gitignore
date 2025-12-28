@@ -6,9 +6,9 @@ target
 *.egg-info/
 
 # test assets
-py/rfdetr/sample.jpg
-py/rfdetr/test.jpg
-py/rfdetr/output.jpg
-py/rfdetr/*.pth
-py/rfdetr/sample.pp.jpg
-py/rfdetr/*.safetensors
+py/rfdetr/*.jpg
+py/rfdetr/output
+py/rfdetr/export
+*.pth
+*.safetensors
+*.onnx
