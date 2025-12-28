@@ -160,12 +160,13 @@ fn preprocess_image(img: &DynamicImage, resolution: usize, device: &Device) -> R
     let tensor = Tensor::from_vec(data, (height, width, 3), device)?;
 
     // Convert to [C, H, W] and normalize to [0, 1]
-    let tensor = tensor.permute((2, 0, 1))?.to_dtype(DType::F32)? / 255.0;
+    let tensor = tensor.permute((2, 0, 1))?.to_dtype(DType::F32)?;
+    let tensor = (tensor / 255.0)?;
 
     // Apply ImageNet normalization
-    let mean = Tensor::from_vec(IMAGENET_MEAN.to_vec(), (3, 1, 1), device)?;
-    let std = Tensor::from_vec(IMAGENET_STD.to_vec(), (3, 1, 1), device)?;
-    let tensor = ((tensor - mean)? / std)?;
+    let mean = Tensor::from_vec(IMAGENET_MEAN.to_vec(), (3, 1, 1), device)?.to_dtype(DType::F32)?;
+    let std = Tensor::from_vec(IMAGENET_STD.to_vec(), (3, 1, 1), device)?.to_dtype(DType::F32)?;
+    let tensor = tensor.broadcast_sub(&mean)?.broadcast_div(&std)?;
 
     // Add batch dimension [1, C, H, W]
     tensor.unsqueeze(0)

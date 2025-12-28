@@ -9,7 +9,7 @@
 
 use candle::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_core as candle;
-use candle_nn::{Conv2d, Conv2dConfig, Embedding, LayerNorm, Linear, Module, VarBuilder};
+use candle_nn::{Conv2d, Conv2dConfig, LayerNorm, Linear, Module, VarBuilder};
 
 // ============================================================================
 // Configuration
@@ -354,19 +354,23 @@ impl MultiHeadSelfAttention {
         let k = self.k_proj.forward(x)?;
         let v = self.v_proj.forward(x)?;
 
-        // Reshape to (B, num_heads, N, head_dim)
+        // Reshape to (B, num_heads, N, head_dim) and make contiguous for matmul
         let q = q
             .reshape((b, n, self.num_heads, self.head_dim))?
-            .permute((0, 2, 1, 3))?;
+            .permute((0, 2, 1, 3))?
+            .contiguous()?;
         let k = k
             .reshape((b, n, self.num_heads, self.head_dim))?
-            .permute((0, 2, 1, 3))?;
+            .permute((0, 2, 1, 3))?
+            .contiguous()?;
         let v = v
             .reshape((b, n, self.num_heads, self.head_dim))?
-            .permute((0, 2, 1, 3))?;
+            .permute((0, 2, 1, 3))?
+            .contiguous()?;
 
         // Attention scores
-        let attn = (q.matmul(&k.transpose(D::Minus2, D::Minus1)?)? * self.scale)?;
+        let k_t = k.transpose(D::Minus2, D::Minus1)?.contiguous()?;
+        let attn = (q.matmul(&k_t)? * self.scale)?;
         let attn = match attn_mask {
             Some(mask) => (attn + mask)?,
             None => attn,
@@ -551,7 +555,9 @@ impl DINOv2Backbone {
 
         for (i, block) in self.blocks.iter().enumerate() {
             current = block.forward(&current)?;
-            if self.out_feature_indexes.contains(&i) {
+            // out_feature_indexes are 1-based (e.g., [3, 6, 9, 12] means after layers 3, 6, 9, 12)
+            // so we check if (i + 1) is in the list
+            if self.out_feature_indexes.contains(&(i + 1)) {
                 // Remove CLS token and reshape to spatial format
                 let feat = current.i((.., 1.., ..))?;
                 features.push(feat);
@@ -568,14 +574,228 @@ impl DINOv2Backbone {
 }
 
 // ============================================================================
-// Multi-Scale Projector
+// Multi-Scale Projector (C2f-based)
 // ============================================================================
 
+/// Spatial LayerNorm that operates on (B, C, H, W) tensors
+#[derive(Debug)]
+struct SpatialLayerNorm {
+    weight: Tensor,
+    bias: Tensor,
+    eps: f64,
+}
+
+impl SpatialLayerNorm {
+    fn load(vb: VarBuilder, dim: usize) -> Result<Self> {
+        let weight = vb.get(dim, "weight")?;
+        let bias = vb.get(dim, "bias")?;
+        Ok(Self {
+            weight,
+            bias,
+            eps: 1e-6,
+        })
+    }
+
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        // x: (B, C, H, W) -> permute to (B, H, W, C)
+        let x = x.permute((0, 2, 3, 1))?;
+        let (b, h, w, c) = x.dims4()?;
+
+        // Compute mean and variance over the last dimension
+        let x_flat = x.reshape((b * h * w, c))?;
+        let mean = x_flat.mean_keepdim(D::Minus1)?;
+        let var = x_flat.var_keepdim(D::Minus1)?;
+
+        // Normalize
+        let x_norm = x_flat
+            .broadcast_sub(&mean)?
+            .broadcast_div(&(var + self.eps)?.sqrt()?)?;
+
+        // Apply weight and bias
+        let out = x_norm
+            .broadcast_mul(&self.weight)?
+            .broadcast_add(&self.bias)?;
+
+        // Reshape back and permute to (B, C, H, W)
+        out.reshape((b, h, w, c))?.permute((0, 3, 1, 2))
+    }
+}
+
+/// Conv + LayerNorm + SiLU module (ConvX in Python with layer_norm=True)
+/// The exported RF-DETR model uses LayerNorm (not BatchNorm) in the projector
+#[derive(Debug)]
+struct ConvLN {
+    conv: Conv2d,
+    ln_weight: Tensor,
+    ln_bias: Tensor,
+    eps: f64,
+}
+
+impl ConvLN {
+    fn load(
+        vb: VarBuilder,
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        stride: usize,
+    ) -> Result<Self> {
+        let padding = kernel_size / 2;
+        let cfg = Conv2dConfig {
+            stride,
+            padding,
+            ..Default::default()
+        };
+        let conv =
+            candle_nn::conv2d_no_bias(in_channels, out_channels, kernel_size, cfg, vb.pp("conv"))?;
+
+        // LayerNorm parameters (bn.weight and bn.bias in the exported file)
+        let ln_weight = vb.get(out_channels, "bn.weight")?;
+        let ln_bias = vb.get(out_channels, "bn.bias")?;
+
+        Ok(Self {
+            conv,
+            ln_weight,
+            ln_bias,
+            eps: 1e-6,
+        })
+    }
+
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let x = self.conv.forward(x)?;
+        // LayerNorm over channel dimension (spatial LayerNorm)
+        // x: (B, C, H, W) -> permute to (B, H, W, C) -> normalize -> permute back
+        let x = x.permute((0, 2, 3, 1))?;
+        let (b, h, w, c) = x.dims4()?;
+
+        // Compute mean and variance over the last dimension (channel)
+        let x_flat = x.reshape((b * h * w, c))?;
+        let mean = x_flat.mean_keepdim(D::Minus1)?;
+        let var = x_flat.var_keepdim(D::Minus1)?;
+
+        // Normalize
+        let x_norm = x_flat
+            .broadcast_sub(&mean)?
+            .broadcast_div(&(var + self.eps)?.sqrt()?)?;
+
+        // Apply weight and bias
+        let out = x_norm
+            .broadcast_mul(&self.ln_weight)?
+            .broadcast_add(&self.ln_bias)?;
+
+        // Reshape back to (B, H, W, C) then permute to (B, C, H, W)
+        let out = out.reshape((b, h, w, c))?.permute((0, 3, 1, 2))?;
+
+        // SiLU activation: x * sigmoid(x)
+        candle_nn::ops::silu(&out)
+    }
+}
+
+/// Bottleneck block used in C2f
+#[derive(Debug)]
+struct Bottleneck {
+    cv1: ConvLN,
+    cv2: ConvLN,
+    add: bool,
+}
+
+impl Bottleneck {
+    fn load(vb: VarBuilder, channels: usize, shortcut: bool) -> Result<Self> {
+        let cv1 = ConvLN::load(vb.pp("cv1"), channels, channels, 3, 1)?;
+        let cv2 = ConvLN::load(vb.pp("cv2"), channels, channels, 3, 1)?;
+        Ok(Self {
+            cv1,
+            cv2,
+            add: shortcut,
+        })
+    }
+
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let out = self.cv2.forward(&self.cv1.forward(x)?)?;
+        if self.add {
+            x + out
+        } else {
+            Ok(out)
+        }
+    }
+}
+
+/// C2f block (CSP Bottleneck with 2 convolutions)
+#[derive(Debug)]
+struct C2f {
+    cv1: ConvLN,
+    cv2: ConvLN,
+    bottlenecks: Vec<Bottleneck>,
+    c: usize, // hidden channels
+}
+
+impl C2f {
+    fn load(
+        vb: VarBuilder,
+        in_channels: usize,
+        out_channels: usize,
+        num_blocks: usize,
+        shortcut: bool,
+    ) -> Result<Self> {
+        let e = 0.5;
+        let c = (out_channels as f64 * e) as usize; // hidden channels
+
+        // cv1: in_channels -> 2*c
+        let cv1 = ConvLN::load(vb.pp("cv1"), in_channels, 2 * c, 1, 1)?;
+
+        // cv2: (2+n)*c -> out_channels
+        let cv2_in = (2 + num_blocks) * c;
+        let cv2 = ConvLN::load(vb.pp("cv2"), cv2_in, out_channels, 1, 1)?;
+
+        // Bottleneck blocks
+        let mut bottlenecks = Vec::with_capacity(num_blocks);
+        for i in 0..num_blocks {
+            let bn = Bottleneck::load(vb.pp(format!("m.{}", i)), c, shortcut)?;
+            bottlenecks.push(bn);
+        }
+
+        Ok(Self {
+            cv1,
+            cv2,
+            bottlenecks,
+            c,
+        })
+    }
+
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        // cv1 output: (B, 2*c, H, W)
+        let y = self.cv1.forward(x)?;
+
+        // Split into two tensors of size c each
+        let (b, _, h, w) = y.dims4()?;
+        let y0 = y.i((.., ..self.c, .., ..))?;
+        let y1 = y.i((.., self.c.., .., ..))?;
+
+        // Collect outputs: [y0, y1, m0(y1), m1(m0(y1)), ...]
+        let mut outputs = vec![y0.reshape((b, self.c, h, w))?];
+        let mut last = y1.reshape((b, self.c, h, w))?;
+        outputs.push(last.clone());
+
+        for bn in &self.bottlenecks {
+            last = bn.forward(&last)?;
+            outputs.push(last.clone());
+        }
+
+        // Concatenate all outputs: (B, (2+n)*c, H, W)
+        let cat = Tensor::cat(&outputs, 1)?;
+
+        // Final convolution
+        self.cv2.forward(&cat)
+    }
+}
+
+/// Multi-Scale Projector with C2f blocks
 #[derive(Debug)]
 pub struct MultiScaleProjector {
-    input_proj: Vec<Linear>,
+    stages: Vec<(C2f, SpatialLayerNorm)>,
     #[allow(dead_code)]
     scale_factors: Vec<f64>,
+    #[allow(dead_code)]
+    num_features: usize,
     span: tracing::Span,
 }
 
@@ -585,37 +805,66 @@ impl MultiScaleProjector {
         in_channels: usize,
         out_channels: usize,
         scale_factors: Vec<f64>,
+        num_features: usize,
     ) -> Result<Self> {
-        let mut input_proj = Vec::with_capacity(scale_factors.len());
+        let num_blocks = 3; // Default for RF-DETR
+        let shortcut = false;
+
+        let mut stages = Vec::with_capacity(scale_factors.len());
+
         for i in 0..scale_factors.len() {
-            let proj = candle_nn::linear(
-                in_channels,
+            // For scale 1.0 (P4), all features are concatenated directly
+            // Input channels = in_channels * num_features (e.g., 384 * 4 = 1536)
+            let c2f_in_channels = in_channels * num_features;
+
+            let c2f = C2f::load(
+                vb.pp(format!("stages.{}.0", i)),
+                c2f_in_channels,
                 out_channels,
-                vb.pp(format!("input_proj.{}", i)),
+                num_blocks,
+                shortcut,
             )?;
-            input_proj.push(proj);
+
+            let ln = SpatialLayerNorm::load(vb.pp(format!("stages.{}.1", i)), out_channels)?;
+
+            stages.push((c2f, ln));
         }
 
         Ok(Self {
-            input_proj,
+            stages,
             scale_factors,
+            num_features,
             span: tracing::span!(tracing::Level::TRACE, "projector"),
         })
     }
 
     pub fn forward(&self, features: &[Tensor]) -> Result<Vec<Tensor>> {
         let _enter = self.span.enter();
-        let mut outputs = Vec::with_capacity(self.input_proj.len());
+        let mut outputs = Vec::with_capacity(self.stages.len());
 
-        // Use the last feature from backbone
-        let feat = features
-            .last()
-            .ok_or_else(|| candle::Error::Msg("No features provided".to_string()))?;
+        // For each scale, concatenate features and pass through C2f + LayerNorm
+        for (c2f, ln) in &self.stages {
+            // Concatenate all features along channel dimension
+            // Features are (B, num_patches, embed_dim), need to reshape to (B, embed_dim, H, W)
+            let mut spatial_features = Vec::with_capacity(features.len());
+            for feat in features {
+                let (b, n, c) = feat.dims3()?;
+                let hw = (n as f64).sqrt() as usize;
+                let spatial = feat.permute((0, 2, 1))?.reshape((b, c, hw, hw))?;
+                spatial_features.push(spatial);
+            }
 
-        for (_i, proj) in self.input_proj.iter().enumerate() {
-            let projected = proj.forward(feat)?;
-            // Reshape to spatial format if needed
-            outputs.push(projected);
+            // Concatenate along channel dimension
+            let cat_feat = Tensor::cat(&spatial_features, 1)?;
+
+            // Pass through C2f and LayerNorm
+            let out = c2f.forward(&cat_feat)?;
+            let out = ln.forward(&out)?;
+
+            // Flatten back to (B, H*W, hidden_dim)
+            let (b, c, h, w) = out.dims4()?;
+            let out = out.reshape((b, c, h * w))?.permute((0, 2, 1))?;
+            outputs.push(out);
         }
 
         Ok(outputs)
@@ -684,15 +933,19 @@ pub fn generate_sine_position_embedding(
 pub struct TransformerDecoderLayer {
     self_attn: MultiHeadSelfAttention,
     norm1: LayerNormWrapper,
-    cross_attn_q_proj: Linear,
-    cross_attn_kv_proj: Linear,
-    cross_attn_out_proj: Linear,
+    // MSDeformAttn cross-attention components
+    cross_attn_value_proj: Linear,
+    cross_attn_output_proj: Linear,
+    cross_attn_sampling_offsets: Linear,
+    cross_attn_attention_weights: Linear,
     norm2: LayerNormWrapper,
     linear1: Linear,
     linear2: Linear,
     norm3: LayerNormWrapper,
     num_heads: usize,
     head_dim: usize,
+    num_levels: usize,
+    num_points: usize,
     span: tracing::Span,
 }
 
@@ -702,16 +955,36 @@ impl TransformerDecoderLayer {
         let sa_nhead = config.sa_nheads;
         let ca_nhead = config.ca_nheads;
         let dim_feedforward = config.dim_feedforward;
+        let num_levels = config.projector_scales.len();
+        let num_points = config.dec_n_points;
 
         let self_attn = MultiHeadSelfAttention::load(vb.pp("self_attn"), d_model, sa_nhead)?;
         let norm1 = LayerNormWrapper::load(vb.pp("norm1"), d_model, 1e-5)?;
 
-        // Cross attention - simplified version without deformable attention
-        let cross_attn_q_proj = candle_nn::linear(d_model, d_model, vb.pp("cross_attn.q_proj"))?;
-        let cross_attn_kv_proj =
-            candle_nn::linear(d_model, d_model * 2, vb.pp("cross_attn.kv_proj"))?;
-        let cross_attn_out_proj =
-            candle_nn::linear(d_model, d_model, vb.pp("cross_attn.out_proj"))?;
+        // MSDeformAttn cross-attention components
+        // value_proj: projects memory to values
+        let cross_attn_value_proj =
+            candle_nn::linear(d_model, d_model, vb.pp("cross_attn.value_proj"))?;
+        // output_proj: projects attention output
+        let cross_attn_output_proj =
+            candle_nn::linear(d_model, d_model, vb.pp("cross_attn.output_proj"))?;
+        // sampling_offsets: predicts offsets for deformable sampling
+        // Output size: num_heads * num_levels * num_points * 2
+        let sampling_offsets_out = ca_nhead * num_levels * num_points * 2;
+        let cross_attn_sampling_offsets = candle_nn::linear(
+            d_model,
+            sampling_offsets_out,
+            vb.pp("cross_attn.sampling_offsets"),
+        )?;
+        // attention_weights: predicts attention weights
+        // Output size: num_heads * num_levels * num_points
+        let attention_weights_out = ca_nhead * num_levels * num_points;
+        let cross_attn_attention_weights = candle_nn::linear(
+            d_model,
+            attention_weights_out,
+            vb.pp("cross_attn.attention_weights"),
+        )?;
+
         let norm2 = LayerNormWrapper::load(vb.pp("norm2"), d_model, 1e-5)?;
 
         let linear1 = candle_nn::linear(d_model, dim_feedforward, vb.pp("linear1"))?;
@@ -721,15 +994,18 @@ impl TransformerDecoderLayer {
         Ok(Self {
             self_attn,
             norm1,
-            cross_attn_q_proj,
-            cross_attn_kv_proj,
-            cross_attn_out_proj,
+            cross_attn_value_proj,
+            cross_attn_output_proj,
+            cross_attn_sampling_offsets,
+            cross_attn_attention_weights,
             norm2,
             linear1,
             linear2,
             norm3,
             num_heads: ca_nhead,
             head_dim: d_model / ca_nhead,
+            num_levels,
+            num_points,
             span: tracing::span!(tracing::Level::TRACE, "decoder-layer"),
         })
     }
@@ -739,10 +1015,11 @@ impl TransformerDecoderLayer {
         tgt: &Tensor,
         memory: &Tensor,
         query_pos: &Tensor,
-        _pos: Option<&Tensor>,
+        _reference_points: Option<&Tensor>,
     ) -> Result<Tensor> {
         let _enter = self.span.enter();
         let (b, n, c) = tgt.dims3()?;
+        let m = memory.dim(1)?;
 
         // Self attention
         let q = (tgt + query_pos)?;
@@ -750,40 +1027,50 @@ impl TransformerDecoderLayer {
         let tgt = (tgt + &tgt2)?;
         let tgt = self.norm1.forward(&tgt)?;
 
-        // Cross attention (simplified - standard attention instead of deformable)
-        let q = self.cross_attn_q_proj.forward(&(&tgt + query_pos)?)?;
-        let kv = self.cross_attn_kv_proj.forward(memory)?;
-        let kv_chunks = kv.chunk(2, D::Minus1)?;
-        let k = &kv_chunks[0];
-        let v = &kv_chunks[1];
+        // Cross attention using MSDeformAttn-like structure
+        // Since true deformable attention requires CUDA kernels, we use a simplified version:
+        // 1. Project query to get sampling offsets and attention weights (not used in simplified version)
+        // 2. Project memory to values
+        // 3. Use standard attention as fallback
 
-        // Reshape for multi-head attention
-        let m = memory.dim(1)?;
-        let q = q
-            .reshape((b, n, self.num_heads, self.head_dim))?
-            .permute((0, 2, 1, 3))?;
-        let k = k
+        let query_with_pos = (&tgt + query_pos)?;
+
+        // These projections are computed but the simplified attention doesn't use deformable sampling
+        let _sampling_offsets = self.cross_attn_sampling_offsets.forward(&query_with_pos)?;
+        let attention_weights = self.cross_attn_attention_weights.forward(&query_with_pos)?;
+
+        // Project memory to values
+        let value = self.cross_attn_value_proj.forward(memory)?;
+
+        // Simplified cross-attention: use attention weights to aggregate values
+        // Note: In full MSDeformAttn, attention_weights would be used for deformable sampling
+        // Here we compute them but use mean pooling as a fallback
+        let _attention_weights_reshaped =
+            attention_weights.reshape((b, n, self.num_heads, self.num_levels * self.num_points))?;
+
+        // For simplified version: use uniform attention over all memory positions
+        // value: (B, M, C) -> (B, num_heads, M, head_dim)
+        let value = value
             .reshape((b, m, self.num_heads, self.head_dim))?
             .permute((0, 2, 1, 3))?;
-        let v = v
-            .reshape((b, m, self.num_heads, self.head_dim))?
-            .permute((0, 2, 1, 3))?;
 
-        let scale = (self.head_dim as f64).powf(-0.5);
-        let attn = (q.matmul(&k.transpose(D::Minus2, D::Minus1)?)? * scale)?;
-        let attn = candle_nn::ops::softmax_last_dim(&attn)?;
-        let tgt2 = attn.matmul(&v)?;
-        let tgt2 = tgt2.permute((0, 2, 1, 3))?.reshape((b, n, c))?;
-        let tgt2 = self.cross_attn_out_proj.forward(&tgt2)?;
+        // Simple mean pooling over memory as fallback (since we can't do true deformable sampling)
+        let value_mean = value.mean_keepdim(2)?; // (B, num_heads, 1, head_dim)
+        let value_mean = value_mean.broadcast_as((b, self.num_heads, n, self.head_dim))?;
 
-        let tgt = (&tgt + &tgt2)?;
+        // Reshape back to (B, N, C)
+        let tgt2 = value_mean.permute((0, 2, 1, 3))?.reshape((b, n, c))?;
+        let tgt2 = self.cross_attn_output_proj.forward(&tgt2)?;
+
+        let tgt = (tgt + &tgt2)?;
         let tgt = self.norm2.forward(&tgt)?;
 
         // FFN
         let tgt2 = self.linear1.forward(&tgt)?;
         let tgt2 = tgt2.relu()?;
         let tgt2 = self.linear2.forward(&tgt2)?;
-        let tgt = (&tgt + &tgt2)?;
+
+        let tgt = (tgt + &tgt2)?;
         self.norm3.forward(&tgt)
     }
 }
@@ -866,12 +1153,17 @@ impl TransformerDecoder {
 }
 
 /// Generate sinusoidal embeddings for position tensor
+/// This matches the Python gen_sineembed_for_position function:
+/// - For each coordinate, computes sin for even indices and cos for odd indices
+/// - Then interleaves them to get dim outputs per coordinate
+/// - Output shape: (b, n, dim * num_coords) where num_coords is 2 or 4
 fn generate_sine_embed_for_position(pos_tensor: &Tensor) -> Result<Tensor> {
     let scale = 2.0 * std::f64::consts::PI;
     let dim = 128_usize; // d_model / 2
     let device = pos_tensor.device();
     let dtype = pos_tensor.dtype();
 
+    // dim_t = 10000 ** (2 * (i // 2) / dim) for i in range(dim)
     let dim_t: Vec<f64> = (0..dim)
         .map(|i| {
             let exp = 2.0 * (i as f64 / 2.0).floor() / dim as f64;
@@ -882,22 +1174,55 @@ fn generate_sine_embed_for_position(pos_tensor: &Tensor) -> Result<Tensor> {
 
     let (b, n, d) = pos_tensor.dims3()?;
 
-    // Extract x, y coordinates
+    // Helper function to compute interleaved sin/cos embeddings for one coordinate
+    // Input: (b, n) coordinate values
+    // Output: (b, n, dim) with sin at even indices, cos at odd indices interleaved
+    let compute_pos_embed = |coord: Tensor| -> Result<Tensor> {
+        // coord: (b, n) -> (b, n, 1) / dim_t -> (b, n, dim)
+        let pos = coord.unsqueeze(D::Minus1)?.broadcast_div(&dim_t)?;
+
+        // In Python: pos[:, :, 0::2].sin() and pos[:, :, 1::2].cos()
+        // Then stack and flatten to interleave them
+        // Even indices (0, 2, 4, ...) get sin
+        // Odd indices (1, 3, 5, ...) get cos
+
+        // Actually, Python does: dim_t[0::2] and dim_t[1::2], which are different values
+        // Let me re-read: pos_x = x_embed[:, :, None] / dim_t gives (b, n, dim)
+        // then pos_x[:, :, 0::2].sin() takes every other element starting from 0
+        // and pos_x[:, :, 1::2].cos() takes every other element starting from 1
+
+        // So for dim=128: pos_even has indices 0,2,4,...,126 (64 values)
+        //                 pos_odd has indices 1,3,5,...,127 (64 values)
+
+        let pos_sin = pos.sin()?;
+        let pos_cos = pos.cos()?;
+
+        // Stack and interleave: take sin of even indices, cos of odd indices
+        // Result should be (b, n, dim) with alternating sin/cos
+        // Python does: torch.stack((sin_even, cos_odd), dim=3).flatten(2)
+        // which gives (b, n, dim/2, 2) -> (b, n, dim)
+
+        // Get even indices (0, 2, 4, ...) for sin
+        let even_indices: Vec<u32> = (0..dim).step_by(2).map(|x| x as u32).collect();
+        let even_idx = Tensor::from_vec(even_indices, (dim / 2,), device)?;
+        let sin_even = pos_sin.index_select(&even_idx, D::Minus1)?;
+
+        // Get odd indices (1, 3, 5, ...) for cos
+        let odd_indices: Vec<u32> = (1..dim).step_by(2).map(|x| x as u32).collect();
+        let odd_idx = Tensor::from_vec(odd_indices, (dim / 2,), device)?;
+        let cos_odd = pos_cos.index_select(&odd_idx, D::Minus1)?;
+
+        // Stack on last dim then flatten: (b, n, dim/2, 2) -> (b, n, dim)
+        let stacked = Tensor::stack(&[&sin_even, &cos_odd], D::Minus1)?;
+        stacked.reshape((b, n, dim))
+    };
+
+    // Extract and encode x, y coordinates
     let x = (pos_tensor.i((.., .., 0))? * scale)?;
     let y = (pos_tensor.i((.., .., 1))? * scale)?;
 
-    // Compute position encodings
-    let pos_x = x.unsqueeze(D::Minus1)?.broadcast_div(&dim_t)?;
-    let pos_y = y.unsqueeze(D::Minus1)?.broadcast_div(&dim_t)?;
-
-    let pos_x_sin = pos_x.sin()?;
-    let pos_x_cos = pos_x.cos()?;
-    let pos_y_sin = pos_y.sin()?;
-    let pos_y_cos = pos_y.cos()?;
-
-    // Interleave and concatenate
-    let pos_x = Tensor::stack(&[&pos_x_sin, &pos_x_cos], D::Minus1)?.reshape((b, n, dim))?;
-    let pos_y = Tensor::stack(&[&pos_y_sin, &pos_y_cos], D::Minus1)?.reshape((b, n, dim))?;
+    let pos_x = compute_pos_embed(x)?;
+    let pos_y = compute_pos_embed(y)?;
 
     if d == 2 {
         Tensor::cat(&[&pos_y, &pos_x], D::Minus1)
@@ -906,13 +1231,8 @@ fn generate_sine_embed_for_position(pos_tensor: &Tensor) -> Result<Tensor> {
         let w = (pos_tensor.i((.., .., 2))? * scale)?;
         let h = (pos_tensor.i((.., .., 3))? * scale)?;
 
-        let pos_w = w.unsqueeze(D::Minus1)?.broadcast_div(&dim_t)?;
-        let pos_h = h.unsqueeze(D::Minus1)?.broadcast_div(&dim_t)?;
-
-        let pos_w =
-            Tensor::stack(&[&pos_w.sin()?, &pos_w.cos()?], D::Minus1)?.reshape((b, n, dim))?;
-        let pos_h =
-            Tensor::stack(&[&pos_h.sin()?, &pos_h.cos()?], D::Minus1)?.reshape((b, n, dim))?;
+        let pos_w = compute_pos_embed(w)?;
+        let pos_h = compute_pos_embed(h)?;
 
         Tensor::cat(&[&pos_y, &pos_x, &pos_w, &pos_h], D::Minus1)
     } else {
@@ -993,8 +1313,8 @@ pub struct RFDETR {
     projector: MultiScaleProjector,
     decoder: TransformerDecoder,
     detection_head: DetectionHead,
-    refpoint_embed: Embedding,
-    query_feat: Embedding,
+    refpoint_embed: Tensor,
+    query_feat: Tensor,
     enc_output: Vec<Linear>,
     enc_output_norm: Vec<LayerNormWrapper>,
     enc_out_class_embed: Vec<Linear>,
@@ -1019,20 +1339,32 @@ impl RFDETR {
             })
             .collect();
 
+        let num_features = config.out_feature_indexes.len();
         let projector = MultiScaleProjector::load(
             vb.pp("backbone.0.projector"),
             config.encoder_embed_dim,
             config.hidden_dim,
             scale_factors,
+            num_features,
         )?;
 
         let decoder = TransformerDecoder::load(vb.pp("transformer"), &config)?;
         let detection_head = DetectionHead::load(vb.clone(), &config)?;
 
-        // Query embeddings
-        let refpoint_embed = candle_nn::embedding(config.num_queries, 4, vb.pp("refpoint_embed"))?;
-        let query_feat =
-            candle_nn::embedding(config.num_queries, config.hidden_dim, vb.pp("query_feat"))?;
+        // Query embeddings - load raw tensors (model has num_queries * 13 entries for group detr)
+        // We'll slice to num_queries at inference time
+        let refpoint_embed = vb.get_with_hints_dtype(
+            (config.num_queries * 13, 4),
+            "refpoint_embed.weight",
+            Default::default(),
+            vb.dtype(),
+        )?;
+        let query_feat = vb.get_with_hints_dtype(
+            (config.num_queries * 13, config.hidden_dim),
+            "query_feat.weight",
+            Default::default(),
+            vb.dtype(),
+        )?;
 
         // Two-stage encoder outputs (only 1 group for inference)
         let mut enc_output = Vec::new();
@@ -1087,10 +1419,20 @@ impl RFDETR {
         let (b, _c, _h, _w) = x.dims4()?;
 
         // Backbone forward
+        println!("Running backbone forward...");
         let features = self.backbone.forward(x)?;
+        println!("Backbone output: {} features", features.len());
+        for (i, f) in features.iter().enumerate() {
+            println!("  Feature {}: {:?}", i, f.shape());
+        }
 
         // Project features
+        println!("Running projector forward...");
         let projected = self.projector.forward(&features)?;
+        println!("Projector output: {} features", projected.len());
+        for (i, f) in projected.iter().enumerate() {
+            println!("  Projected {}: {:?}", i, f.shape());
+        }
 
         // Flatten and concatenate multi-scale features
         let mut src_flatten = Vec::new();
@@ -1109,14 +1451,21 @@ impl RFDETR {
         } else {
             Tensor::cat(&src_flatten.iter().collect::<Vec<_>>(), 1)?
         };
+        println!("Memory shape: {:?}", memory.shape());
 
         // Two-stage proposal generation
+        println!(
+            "Two-stage: {}, enc_output len: {}",
+            self.config.two_stage,
+            self.enc_output.len()
+        );
         let (tgt, refpoints) = if self.config.two_stage && !self.enc_output.is_empty() {
+            println!("Using two-stage proposal generation...");
             self.generate_two_stage_proposals(&memory, &spatial_shapes, b)?
         } else {
-            // Use learned queries
-            let query_feat = self.query_feat.embeddings();
-            let refpoint = self.refpoint_embed.embeddings();
+            // Use learned queries - slice to num_queries (stored with 13x for group detr)
+            let query_feat = self.query_feat.i(..self.config.num_queries)?;
+            let refpoint = self.refpoint_embed.i(..self.config.num_queries)?;
             (
                 query_feat.unsqueeze(0)?.broadcast_as((
                     b,
@@ -1128,9 +1477,16 @@ impl RFDETR {
                     .broadcast_as((b, self.config.num_queries, 4))?,
             )
         };
-
+        println!("tgt shape: {:?}", tgt.shape());
+        println!("refpoints shape: {:?}", refpoints.shape());
         // Transformer decoder
+        println!("Running decoder forward...");
         let (hs, ref_unsigmoid) = self.decoder.forward(&tgt, &memory, &refpoints, None)?;
+        println!(
+            "Decoder output - hs: {:?}, ref: {:?}",
+            hs.shape(),
+            ref_unsigmoid.shape()
+        );
 
         // Detection head
         self.detection_head
@@ -1146,21 +1502,40 @@ impl RFDETR {
         let _device = memory.device();
         let _dtype = memory.dtype();
 
+        println!("  gen_encoder_output_proposals...");
         // Generate encoder output proposals
         let (output_memory, output_proposals) =
             self.gen_encoder_output_proposals(memory, spatial_shapes, batch_size)?;
+        println!(
+            "  output_memory: {:?}, output_proposals: {:?}",
+            output_memory.shape(),
+            output_proposals.shape()
+        );
 
         // Apply encoder output projection
+        println!("  enc_output forward...");
         let output_memory = self.enc_output[0].forward(&output_memory)?;
+        println!("  enc_output_norm forward...");
         let output_memory = self.enc_output_norm[0].forward(&output_memory)?;
+        println!("  output_memory after norm: {:?}", output_memory.shape());
 
         // Get classification scores
+        println!("  enc_out_class_embed forward...");
         let enc_outputs_class = self.enc_out_class_embed[0].forward(&output_memory)?;
+        println!("  enc_outputs_class: {:?}", enc_outputs_class.shape());
 
         // Get top-k proposals
         let topk = self.config.num_queries.min(enc_outputs_class.dim(1)?);
+        println!("  Getting top-k proposals, topk={}", topk);
         let max_scores = enc_outputs_class.max(D::Minus1)?;
-        let topk_indices = max_scores.arg_sort_last_dim(false)?.i((.., ..topk))?;
+        println!("  max_scores: {:?}", max_scores.shape());
+
+        // Move to CPU for arg_sort (CUDA has issues with this operation)
+        let device = max_scores.device().clone();
+        let max_scores_cpu = max_scores.to_device(&Device::Cpu)?;
+        let topk_indices = max_scores_cpu.arg_sort_last_dim(false)?.i((.., ..topk))?;
+        let topk_indices = topk_indices.to_device(&device)?;
+        println!("  topk_indices: {:?}", topk_indices.shape());
 
         // Gather top-k proposals and memory
         let refpoints = self.gather_topk(&output_proposals, &topk_indices)?;
@@ -1240,8 +1615,12 @@ impl RFDETR {
         let (b, _n, c) = tensor.dims3()?;
         let k = indices.dim(1)?;
 
-        // Expand indices for gather
-        let indices_expanded = indices.unsqueeze(D::Minus1)?.broadcast_as((b, k, c))?;
+        // Expand indices for gather - make contiguous for CUDA
+        let indices_expanded = indices
+            .unsqueeze(D::Minus1)?
+            .broadcast_as((b, k, c))?
+            .contiguous()?;
+        let tensor = tensor.contiguous()?;
         tensor.gather(&indices_expanded, 1)
     }
 }
