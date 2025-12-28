@@ -19,7 +19,7 @@ mod projector;
 mod query_embed;
 mod transformer;
 
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Instant};
 
 use candle_core::{DType, Device, Result};
 use candle_nn::VarBuilder;
@@ -310,11 +310,12 @@ pub fn main() -> anyhow::Result<()> {
         );
     }
 
+    let start = Instant::now();
     let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[model_path], DType::F32, &device)? };
-    println!("Model weights loaded into VarBuilder");
     let model = RfDetr::load(vb, &config)?;
-    println!("Model loaded successfully");
+    println!("Model loaded successfully in {:?}", start.elapsed());
 
+    let start = Instant::now();
     let detections = predict(
         &model,
         &args.image,
@@ -322,6 +323,7 @@ pub fn main() -> anyhow::Result<()> {
         &device,
         args.confidence_threshold,
     )?;
+    println!("Inference completed in {:?}", start.elapsed());
 
     if detections.is_empty() {
         println!("No detections found.");
