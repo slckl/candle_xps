@@ -50,8 +50,6 @@ model.optimize_for_inference()
 optimize_time = time.time() - start_time
 print(f"Model optimization time: {optimize_time:.4f} seconds")
 
-# url = "https://media.roboflow.com/notebooks/examples/dog-2.jpeg"
-# image = Image.open(io.BytesIO(requests.get(url).content))
 image = Image.open("sample.jpg")
 start_time = time.time()
 
