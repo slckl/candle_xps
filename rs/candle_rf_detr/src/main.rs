@@ -9,26 +9,24 @@ extern crate intel_mkl_src;
 extern crate accelerate_src;
 
 mod coco_classes;
+mod config;
+mod detection;
 mod model;
 
-use candle_core as candle;
-use model::{nms, postprocess, Detection, RFDETRConfig, RFDETR};
-
-use candle::{DType, Device, Result, Tensor};
+use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;
 use clap::{Parser, ValueEnum};
 use image::DynamicImage;
 
-use tracing_chrome::ChromeLayerBuilder;
-use tracing_subscriber::prelude::*;
+use crate::{config::RfDetrConfig, detection::Detection, model::RfDetr};
 
 /// Select the compute device
 pub fn device(cpu: bool) -> Result<Device> {
     if cpu {
         Ok(Device::Cpu)
-    } else if candle::utils::cuda_is_available() {
+    } else if candle_core::utils::cuda_is_available() {
         Ok(Device::new_cuda(0)?)
-    } else if candle::utils::metal_is_available() {
+    } else if candle_core::utils::metal_is_available() {
         Ok(Device::new_metal(0)?)
     } else {
         #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
@@ -56,13 +54,13 @@ enum Which {
 }
 
 impl Which {
-    fn config(&self) -> RFDETRConfig {
+    fn config(&self) -> RfDetrConfig {
         match self {
-            Which::Nano => RFDETRConfig::nano(),
-            Which::Small => RFDETRConfig::small(),
-            Which::Medium => RFDETRConfig::medium(),
-            Which::Base => RFDETRConfig::base(),
-            Which::Large => RFDETRConfig::large(),
+            Which::Nano => RfDetrConfig::nano(),
+            Which::Small => RfDetrConfig::small(),
+            Which::Medium => RfDetrConfig::medium(),
+            Which::Base => RfDetrConfig::base(),
+            Which::Large => RfDetrConfig::large(),
         }
     }
 
@@ -84,32 +82,20 @@ pub struct Args {
     #[arg(long)]
     cpu: bool,
 
-    /// Enable tracing (generates a trace-timestamp.json file).
-    #[arg(long)]
-    tracing: bool,
-
-    /// Model weights, in safetensors format.
+    /// Path to model weights, in safetensors format.
     #[arg(long)]
     model: Option<String>,
 
     /// Which model variant to use.
-    #[arg(long, value_enum, default_value_t = Which::Medium)]
+    #[arg(long, value_enum, default_value_t = Which::Small)]
     which: Which,
 
-    /// Input images to process.
-    images: Vec<String>,
+    /// Input image to process.
+    image: String,
 
     /// Threshold for the model confidence level.
     #[arg(long, default_value_t = 0.5)]
     confidence_threshold: f32,
-
-    /// Threshold for non-maximum suppression.
-    #[arg(long, default_value_t = 0.5)]
-    nms_threshold: f32,
-
-    /// Number of top detections to return.
-    #[arg(long, default_value_t = 300)]
-    num_select: usize,
 
     /// The size for the legend, 0 means no legend.
     #[arg(long, default_value_t = 14)]
@@ -138,40 +124,6 @@ impl Args {
     }
 }
 
-/// Image normalization constants (ImageNet statistics)
-const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
-const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
-
-/// Preprocess an image for RF-DETR inference
-fn preprocess_image(img: &DynamicImage, resolution: usize, device: &Device) -> Result<Tensor> {
-    // Resize to target resolution
-    let img = img.resize_exact(
-        resolution as u32,
-        resolution as u32,
-        image::imageops::FilterType::Triangle,
-    );
-
-    // Convert to RGB and normalize
-    let img = img.to_rgb8();
-    let (width, height) = (img.width() as usize, img.height() as usize);
-    let data = img.into_raw();
-
-    // Create tensor [H, W, C]
-    let tensor = Tensor::from_vec(data, (height, width, 3), device)?;
-
-    // Convert to [C, H, W] and normalize to [0, 1]
-    let tensor = tensor.permute((2, 0, 1))?.to_dtype(DType::F32)?;
-    let tensor = (tensor / 255.0)?;
-
-    // Apply ImageNet normalization
-    let mean = Tensor::from_vec(IMAGENET_MEAN.to_vec(), (3, 1, 1), device)?.to_dtype(DType::F32)?;
-    let std = Tensor::from_vec(IMAGENET_STD.to_vec(), (3, 1, 1), device)?.to_dtype(DType::F32)?;
-    let tensor = tensor.broadcast_sub(&mean)?.broadcast_div(&std)?;
-
-    // Add batch dimension [1, C, H, W]
-    tensor.unsqueeze(0)
-}
-
 /// Draw detections on an image
 fn draw_detections(
     img: DynamicImage,
@@ -180,7 +132,7 @@ fn draw_detections(
 ) -> Result<DynamicImage> {
     let mut img = img.to_rgb8();
     let font = Vec::from(include_bytes!("roboto-mono-stripped.ttf") as &[u8]);
-    let font = ab_glyph::FontRef::try_from_slice(&font).map_err(candle::Error::wrap)?;
+    let font = ab_glyph::FontRef::try_from_slice(&font).map_err(candle_core::Error::wrap)?;
 
     for det in detections {
         let class_name = coco_classes::get_class_name(det.class_id);
@@ -232,71 +184,12 @@ fn draw_detections(
 }
 
 /// Run inference on a single image
-fn run_inference(
-    model: &RFDETR,
-    image_path: &str,
-    args: &Args,
-    device: &Device,
-) -> anyhow::Result<()> {
-    let mut image_path = std::path::PathBuf::from(image_path);
-    println!("Processing: {:?}", image_path);
-
-    // Load and preprocess image
-    let original_image = image::ImageReader::open(&image_path)?
-        .decode()
-        .map_err(candle::Error::wrap)?;
-
-    let (orig_h, orig_w) = (
-        original_image.height() as usize,
-        original_image.width() as usize,
-    );
-    let resolution = model.config.resolution;
-
-    let input = preprocess_image(&original_image, resolution, device)?;
-    println!("Input shape: {:?}", input.shape());
-
-    // Run inference
-    let (pred_logits, pred_boxes) = model.forward(&input)?;
-    println!(
-        "Output shapes - logits: {:?}, boxes: {:?}",
-        pred_logits.shape(),
-        pred_boxes.shape()
-    );
-
-    // Post-process
-    let mut detections = postprocess(
-        &pred_logits,
-        &pred_boxes,
-        (orig_h, orig_w),
-        args.num_select,
-        args.confidence_threshold,
-    )?;
-
-    // Apply NMS
-    nms(&mut detections, args.nms_threshold);
-
-    println!("Found {} detections after NMS", detections.len());
-
-    // Draw and save
-    let output_image = draw_detections(original_image, &detections, args.legend_size)?;
-    image_path.set_extension("pp.jpg");
-    println!("Saving to: {:?}", image_path);
-    output_image.save(&image_path)?;
-
-    Ok(())
+fn predict(model: &RfDetr, image_path: &str, device: &Device) -> anyhow::Result<Vec<Detection>> {
+    todo!()
 }
 
 pub fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-
-    // Setup tracing if enabled
-    let _guard = if args.tracing {
-        let (chrome_layer, guard) = ChromeLayerBuilder::new().build();
-        tracing_subscriber::registry().with(chrome_layer).init();
-        Some(guard)
-    } else {
-        None
-    };
 
     // Get device
     let device = device(args.cpu)?;
@@ -324,20 +217,11 @@ pub fn main() -> anyhow::Result<()> {
 
     let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[model_path], DType::F32, &device)? };
     println!("Model weights loaded into VarBuilder");
-    let model = RFDETR::load(vb, config)?;
+    let model = RfDetr::load(vb, &config)?;
     println!("Model loaded successfully");
 
-    // Process images
-    if args.images.is_empty() {
-        println!("No images provided. Use: candle_rf_detr [OPTIONS] <IMAGE>...");
-        return Ok(());
-    }
-
-    for image_path in &args.images {
-        if let Err(e) = run_inference(&model, image_path, &args, &device) {
-            eprintln!("Error processing {}: {}", image_path, e);
-        }
-    }
+    let detections = predict(&model, &args.image, &device)?;
+    todo!("annotation");
 
     Ok(())
 }

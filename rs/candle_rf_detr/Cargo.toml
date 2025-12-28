@@ -13,9 +13,6 @@ clap = { version = "4.5.53", features = ["derive"] }
 hf-hub = { version = "0.4.3" }
 image = { version = "0.25.9" }
 imageproc = { version = "0.25.0" }
-tracing = "0.1.44"
-tracing-chrome = "0.7.2"
-tracing-subscriber = "0.3.22"
 
 [features]
 default = []

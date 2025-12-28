@@ -397,9 +397,6 @@ dependencies = [
  "hf-hub",
  "image",
  "imageproc",
- "tracing",
- "tracing-chrome",
- "tracing-subscriber",
 ]
 
 [[package]]
