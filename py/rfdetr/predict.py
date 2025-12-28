@@ -68,6 +68,9 @@ labels = [
     f"{COCO_CLASSES[class_id]} {confidence:.2f}"
     for class_id, confidence in zip(detections.class_id, detections.confidence)
 ]
+print(f"{len(labels)} objects detected:")
+for label in labels:
+    print(f"  {label}")
 
 annotated_image = image.copy()
 annotated_image = sv.BoxAnnotator().annotate(annotated_image, detections)
