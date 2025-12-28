@@ -72,5 +72,3 @@ annotated_image = sv.LabelAnnotator().annotate(annotated_image, detections, labe
 
 # save image to output.jpg
 annotated_image.save("sample.py.jpg")
-
-# sv.plot_image(annotated_image)
