@@ -9,6 +9,7 @@ use crate::config::RfDetrConfig;
 use crate::dino2::{DinoV2Encoder, Dinov2Config};
 use crate::pos_enc::PositionEmbeddingSine;
 use crate::projector::{MultiScaleProjector, ProjectorConfig};
+use crate::query_embed::QueryEmbeddings;
 
 /// RF-DETR Object Detection Model
 ///
@@ -26,12 +27,13 @@ pub struct RfDetr {
 
     /// Position encoding generator
     position_encoding: PositionEmbeddingSine,
+
+    /// Query embeddings (refpoint_embed and query_feat)
+    query_embeddings: QueryEmbeddings,
     // TODO: Add remaining model components
     // - transformer decoder
     // - class embedding head
     // - bbox embedding head
-    // - reference point embedding
-    // - query features
 }
 
 impl RfDetr {
@@ -78,6 +80,14 @@ impl RfDetr {
         // Create position encoding (no weights to load - computed from formula)
         let position_encoding = PositionEmbeddingSine::for_rf_detr(config.hidden_dim);
 
+        // Load query embeddings (refpoint_embed and query_feat)
+        let query_embeddings = QueryEmbeddings::load(
+            vb.clone(),
+            config.num_queries,
+            config.hidden_dim,
+            config.group_detr,
+        )?;
+
         // TODO: Load transformer
         // Weight path: transformer.*
 
@@ -98,6 +108,7 @@ impl RfDetr {
             backbone_encoder,
             projector,
             position_encoding,
+            query_embeddings,
         })
     }
 
@@ -133,6 +144,11 @@ impl RfDetr {
     pub fn backbone_forward(&self, pixel_values: &Tensor) -> Result<Vec<Tensor>> {
         let encoder_outputs = self.backbone_encoder_forward(pixel_values)?;
         self.projector_forward(&encoder_outputs)
+    }
+
+    /// Get query embeddings
+    pub fn query_embeddings(&self) -> &QueryEmbeddings {
+        &self.query_embeddings
     }
 
     /// Compute position encodings for feature maps

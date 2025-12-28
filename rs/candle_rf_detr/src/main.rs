@@ -16,6 +16,7 @@ mod model;
 mod pos_enc;
 mod preprocess;
 mod projector;
+mod query_embed;
 
 use candle_core::{DType, Device, Result};
 use candle_nn::VarBuilder;
@@ -244,7 +245,21 @@ fn predict(
         stats.print(&format!("    06_position_encoding_{}", i));
     }
 
-    // TODO: Steps 07+: Run through rest of model
+    // Steps 07-08: Get query embeddings
+    println!("Query embeddings:");
+    let query_embeddings = model.query_embeddings();
+
+    let refpoint_embed = query_embeddings.refpoint_embed();
+    let stats = TensorStats::from_tensor(refpoint_embed)?;
+    println!("  refpoint_embed: shape={:?}", stats.shape);
+    stats.print("    07_refpoint_embed");
+
+    let query_feat = query_embeddings.query_feat();
+    let stats = TensorStats::from_tensor(query_feat)?;
+    println!("  query_feat: shape={:?}", stats.shape);
+    stats.print("    08_query_feat");
+
+    // TODO: Steps 09+: Run through rest of model
     todo!("Full model inference not yet implemented")
 }
 
