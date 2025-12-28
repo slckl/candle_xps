@@ -106,7 +106,7 @@ pub struct Args {
     confidence_threshold: f32,
 
     /// The size for the legend, 0 means no legend.
-    #[arg(long, default_value_t = 14)]
+    #[arg(long, default_value_t = 20)]
     legend_size: u32,
 }
 
