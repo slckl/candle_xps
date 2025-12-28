@@ -75,11 +75,24 @@ impl RfDetr {
 
         // Load projector
         // Weight path: backbone.0.projector.*
-        let projector_config = ProjectorConfig::small(
-            config.hidden_dim,
-            dino_config.hidden_size,
-            config.out_feature_indexes.len(),
-        );
+        // Use different config based on scale factors
+        let projector_config = if config.projector_scale.len() == 1
+            && config.projector_scale[0] == crate::config::ProjectorScale::P4
+        {
+            // Small/Medium/Nano: single scale at P4 (scale_factor=1.0)
+            ProjectorConfig::small(
+                config.hidden_dim,
+                dino_config.hidden_size,
+                config.out_feature_indexes.len(),
+            )
+        } else {
+            // Large: P3+P5 (scale_factors=[2.0, 0.5])
+            ProjectorConfig::large(
+                config.hidden_dim,
+                dino_config.hidden_size,
+                config.out_feature_indexes.len(),
+            )
+        };
         let projector =
             MultiScaleProjector::load(vb.pp("backbone.0.projector"), &projector_config)?;
 

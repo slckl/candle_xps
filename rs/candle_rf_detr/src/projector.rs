@@ -9,12 +9,17 @@
 //! - Concatenated: [B, 1536, H, W]
 //! - Output: 1 feature map of shape [B, 256, H, W]
 //!
+//! For RF-DETR large model with projector_scale=["P3", "P5"] and scale_factors=[2.0, 0.5]:
+//! - Input: 4 feature maps of shape [B, 768, H, W] each
+//! - P3 (scale=2.0): Each feature upsampled via ConvTranspose2d (768 -> 384), concat to 1536
+//! - P5 (scale=0.5): Each feature downsampled via ConvX stride=2 (768 -> 768), concat to 3072
+//!
 //! The structure is:
-//! - stages_sampling: Identity (no upsampling/downsampling for scale=1.0)
+//! - stages_sampling: List of sampling modules per scale (identity/upsample/downsample)
 //! - stages: C2f -> LayerNorm
 
-use candle_core::{Result, Tensor, D};
-use candle_nn::{Conv2d, Conv2dConfig, Module, VarBuilder};
+use candle_core::{DType, Result, Tensor, D};
+use candle_nn::{Conv2d, Conv2dConfig, ConvTranspose2d, ConvTranspose2dConfig, Module, VarBuilder};
 
 /// 2D Layer Normalization (channels-last style, applied to NCHW tensors)
 ///
@@ -58,13 +63,20 @@ impl LayerNorm2d {
     }
 }
 
+/// Activation type for ConvX
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Activation {
+    Silu,
+    Relu,
+}
+
 /// Convolution + LayerNorm + Activation module
 ///
 /// This is the ConvX module from the Python implementation.
 pub struct ConvX {
     conv: Conv2d,
     bn: LayerNorm2d,
-    // Using SiLU activation
+    activation: Activation,
 }
 
 impl ConvX {
@@ -74,6 +86,24 @@ impl ConvX {
         out_channels: usize,
         kernel_size: usize,
         stride: usize,
+    ) -> Result<Self> {
+        Self::load_with_activation(
+            vb,
+            in_channels,
+            out_channels,
+            kernel_size,
+            stride,
+            Activation::Silu,
+        )
+    }
+
+    pub fn load_with_activation(
+        vb: VarBuilder,
+        in_channels: usize,
+        out_channels: usize,
+        kernel_size: usize,
+        stride: usize,
+        activation: Activation,
     ) -> Result<Self> {
         let padding = kernel_size / 2;
         let conv_config = Conv2dConfig {
@@ -90,15 +120,103 @@ impl ConvX {
         )?;
         let bn = LayerNorm2d::load(vb.pp("bn"), out_channels, 1e-6)?;
 
-        Ok(Self { conv, bn })
+        Ok(Self {
+            conv,
+            bn,
+            activation,
+        })
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let x = x.contiguous()?;
         let x = self.conv.forward(&x)?;
         let x = self.bn.forward(&x)?;
-        // SiLU activation: x * sigmoid(x)
-        candle_nn::ops::silu(&x)
+        match self.activation {
+            Activation::Silu => candle_nn::ops::silu(&x),
+            Activation::Relu => x.relu(),
+        }
+    }
+}
+
+/// Simple ConvTranspose2d for upsampling (no normalization or activation)
+///
+/// Used in scale=2.0 sampling for the large model projector.
+/// Weight path: stages_sampling.{scale_idx}.{feat_idx}.0.weight/bias
+pub struct ConvTransposeSimple {
+    conv: ConvTranspose2d,
+}
+
+impl ConvTransposeSimple {
+    pub fn load(vb: VarBuilder, in_channels: usize, out_channels: usize) -> Result<Self> {
+        let config = ConvTranspose2dConfig {
+            stride: 2,
+            ..Default::default()
+        };
+        // Weight path is just "0" since it's Sequential((0): ConvTranspose2d(...))
+        let conv = candle_nn::conv_transpose2d(
+            in_channels,
+            out_channels,
+            2, // kernel_size
+            config,
+            vb.pp("0"),
+        )?;
+
+        Ok(Self { conv })
+    }
+
+    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        let x = x.contiguous()?;
+        self.conv.forward(&x)
+    }
+}
+
+/// Sampling module for a single feature map in the projector
+///
+/// For scale=1.0: Identity (no resampling)
+/// For scale=2.0: ConvTranspose2d upsampling (halves channels)
+/// For scale=0.5: ConvX with stride=2 downsampling (keeps channels)
+pub enum SamplingModule {
+    Identity,
+    /// Upsample with ConvTranspose2d (scale=2.0): in_ch -> in_ch/2
+    Upsample(ConvTransposeSimple),
+    /// Downsample with ConvX stride=2 (scale=0.5): in_ch -> in_ch
+    Downsample(ConvX),
+}
+
+impl SamplingModule {
+    pub fn load_for_scale(vb: VarBuilder, in_channels: usize, scale: f64) -> Result<(Self, usize)> {
+        // Returns (module, output_channels)
+        if scale == 1.0 {
+            Ok((SamplingModule::Identity, in_channels))
+        } else if scale == 2.0 {
+            // Upsample: ConvTranspose2d halves channels
+            // Weight path: stages_sampling.{scale}.{feat}.0.weight/bias
+            let out_channels = in_channels / 2;
+            let block = ConvTransposeSimple::load(vb, in_channels, out_channels)?;
+            Ok((SamplingModule::Upsample(block), out_channels))
+        } else if scale == 0.5 {
+            // Downsample: ConvX with stride=2, keeps channels
+            // Weight path: stages_sampling.{scale}.{feat}.0.conv.weight, .0.bn.weight/bias
+            let convx = ConvX::load_with_activation(
+                vb.pp("0"),
+                in_channels,
+                in_channels,
+                3,
+                2,
+                Activation::Relu, // Uses ReLU for downsampling
+            )?;
+            Ok((SamplingModule::Downsample(convx), in_channels))
+        } else {
+            candle_core::bail!("Unsupported scale factor: {}", scale);
+        }
+    }
+
+    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        match self {
+            SamplingModule::Identity => Ok(x.clone()),
+            SamplingModule::Upsample(block) => block.forward(x),
+            SamplingModule::Downsample(convx) => convx.forward(x),
+        }
     }
 }
 
@@ -234,6 +352,20 @@ impl ProjectorConfig {
             num_blocks: 3,
         }
     }
+
+    /// Create projector config for RF-DETR large model (P3+P5, scale_factors=[2.0, 0.5])
+    pub fn large(
+        hidden_dim: usize,
+        encoder_hidden_size: usize,
+        num_encoder_outputs: usize,
+    ) -> Self {
+        Self {
+            in_channels: vec![encoder_hidden_size; num_encoder_outputs], // [768, 768, 768, 768]
+            out_channels: hidden_dim,                                    // 384
+            scale_factors: vec![2.0, 0.5],                               // P3 and P5
+            num_blocks: 3,
+        }
+    }
 }
 
 /// Multi-Scale Projector
@@ -241,9 +373,17 @@ impl ProjectorConfig {
 /// For RF-DETR small with scale_factor=1.0:
 /// - stages_sampling is identity (no resampling)
 /// - stages contains: C2f -> LayerNorm
+///
+/// For RF-DETR large with scale_factors=[2.0, 0.5]:
+/// - stages_sampling[0] (P3): ConvTranspose2d upsampling per feature
+/// - stages_sampling[1] (P5): ConvX downsample per feature
+/// - stages contains: C2f -> LayerNorm for each scale
 pub struct MultiScaleProjector {
     /// Scale factors for each output level
     scale_factors: Vec<f64>,
+    /// Sampling modules for each scale and each input feature
+    /// Outer vec: per scale, Inner vec: per input feature
+    stages_sampling: Vec<Vec<SamplingModule>>,
     /// C2f module for each scale
     c2f_modules: Vec<C2f>,
     /// Final LayerNorm for each scale
@@ -254,25 +394,32 @@ pub struct MultiScaleProjector {
 
 impl MultiScaleProjector {
     pub fn load(vb: VarBuilder, config: &ProjectorConfig) -> Result<Self> {
+        let mut stages_sampling = Vec::new();
         let mut c2f_modules = Vec::new();
         let mut layer_norms = Vec::new();
 
         for (i, &scale) in config.scale_factors.iter().enumerate() {
-            // For scale=1.0, no resampling, input channels = sum of all encoder outputs
-            // For other scales, this would be different
-            let in_dim = if scale == 1.0 {
-                config.in_channels.iter().sum()
-            } else {
-                // For other scales, channels would be adjusted based on resampling
-                // For now, we only support scale=1.0
-                unimplemented!("Only scale_factor=1.0 is currently supported");
-            };
+            // Load sampling modules for each input feature
+            let mut sampling_modules = Vec::new();
+            let mut total_out_channels = 0usize;
+
+            for (j, &in_ch) in config.in_channels.iter().enumerate() {
+                let (module, out_ch) = SamplingModule::load_for_scale(
+                    vb.pp(format!("stages_sampling.{}.{}", i, j)),
+                    in_ch,
+                    scale,
+                )?;
+                sampling_modules.push(module);
+                total_out_channels += out_ch;
+            }
+
+            stages_sampling.push(sampling_modules);
 
             // Load C2f module
             // stages.{i}.0 is C2f
             let c2f = C2f::load(
                 vb.pp(format!("stages.{}.0", i)),
-                in_dim,
+                total_out_channels,
                 config.out_channels,
                 config.num_blocks,
                 false, // shortcut=False in projector
@@ -289,6 +436,7 @@ impl MultiScaleProjector {
 
         Ok(Self {
             scale_factors: config.scale_factors.clone(),
+            stages_sampling,
             c2f_modules,
             layer_norms,
             num_inputs: config.in_channels.len(),
@@ -313,19 +461,26 @@ impl MultiScaleProjector {
 
         let mut results = Vec::new();
 
-        for (&scale, (c2f, ln)) in self
-            .scale_factors
+        for (stage_idx, ((sampling_modules, c2f), ln)) in self
+            .stages_sampling
             .iter()
-            .zip(self.c2f_modules.iter().zip(self.layer_norms.iter()))
+            .zip(self.c2f_modules.iter())
+            .zip(self.layer_norms.iter())
+            .enumerate()
         {
-            // For scale=1.0, concatenate all inputs (no resampling)
-            let feat_fuse = if scale == 1.0 {
-                // Concatenate along channel dimension
-                let tensors: Vec<&Tensor> = x.iter().collect();
+            // Apply sampling to each input feature
+            let mut sampled_features = Vec::new();
+            for (feat, sampling) in x.iter().zip(sampling_modules.iter()) {
+                let sampled = sampling.forward(feat)?;
+                sampled_features.push(sampled);
+            }
+
+            // Concatenate all sampled features along channel dimension
+            let feat_fuse = if sampled_features.len() > 1 {
+                let tensors: Vec<&Tensor> = sampled_features.iter().collect();
                 Tensor::cat(&tensors, 1)?
             } else {
-                // For other scales, would need to resample each input
-                unimplemented!("Only scale_factor=1.0 is currently supported");
+                sampled_features.into_iter().next().unwrap()
             };
 
             // Apply C2f
