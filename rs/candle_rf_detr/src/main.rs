@@ -14,6 +14,7 @@ mod detection;
 mod dino2;
 mod model;
 mod preprocess;
+mod projector;
 
 use candle_core::{DType, Device, Result};
 use candle_nn::VarBuilder;
@@ -205,7 +206,7 @@ fn predict(
 
     // Step 04: Run backbone encoder
     println!("Running backbone encoder...");
-    let encoder_outputs = model.backbone_forward(&batch_tensor)?;
+    let encoder_outputs = model.backbone_encoder_forward(&batch_tensor)?;
 
     println!(
         "  Backbone encoder outputs: {} feature maps",
@@ -217,7 +218,21 @@ fn predict(
         stats.print(&format!("    04_backbone_encoder_output_{}", i));
     }
 
-    // TODO: Steps 05+: Run through rest of model
+    // Step 05: Run projector
+    println!("Running projector...");
+    let projector_outputs = model.projector_forward(&encoder_outputs)?;
+
+    println!(
+        "  Projector outputs: {} feature maps",
+        projector_outputs.len()
+    );
+    for (i, feat) in projector_outputs.iter().enumerate() {
+        let stats = TensorStats::from_tensor(feat)?;
+        println!("  Output {}: shape={:?}", i, stats.shape);
+        stats.print(&format!("    05_backbone_projector_output_{}", i));
+    }
+
+    // TODO: Steps 06+: Run through rest of model
     todo!("Full model inference not yet implemented")
 }
 
