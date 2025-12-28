@@ -19,6 +19,8 @@ mod projector;
 mod query_embed;
 mod transformer;
 
+use std::path::PathBuf;
+
 use candle_core::{DType, Device, Result};
 use candle_nn::VarBuilder;
 use clap::{Parser, ValueEnum};
@@ -333,9 +335,10 @@ pub fn main() -> anyhow::Result<()> {
     let annotated = draw_detections(img, &detections, args.legend_size)?;
 
     // Save output
-    let output_path = format!("{}.out.jpg", args.image);
+    let mut output_path = PathBuf::from(&args.image);
+    output_path.set_extension("pp.jpg");
     annotated.save(&output_path)?;
-    println!("Annotated image saved to: {}", output_path);
+    println!("Annotated image saved to: {:?}", output_path);
 
     Ok(())
 }
