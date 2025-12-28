@@ -2,14 +2,15 @@
 //!
 //! This module provides the main RF-DETR model structure and loading functionality.
 
-use candle_core::{Device, Result, Tensor};
-use candle_nn::VarBuilder;
+use candle_core::{Device, Module, Result, Tensor};
+use candle_nn::{linear, Linear, VarBuilder};
 
 use crate::config::RfDetrConfig;
 use crate::dino2::{DinoV2Encoder, Dinov2Config};
 use crate::pos_enc::PositionEmbeddingSine;
 use crate::projector::{MultiScaleProjector, ProjectorConfig};
 use crate::query_embed::QueryEmbeddings;
+use crate::transformer::{Mlp, Transformer};
 
 /// RF-DETR Object Detection Model
 ///
@@ -30,10 +31,15 @@ pub struct RfDetr {
 
     /// Query embeddings (refpoint_embed and query_feat)
     query_embeddings: QueryEmbeddings,
-    // TODO: Add remaining model components
-    // - transformer decoder
-    // - class embedding head
-    // - bbox embedding head
+
+    /// Transformer (decoder + two-stage)
+    transformer: Transformer,
+
+    /// Class embedding head
+    class_embed: Linear,
+
+    /// Bbox embedding head
+    bbox_embed: Mlp,
 }
 
 impl RfDetr {
@@ -88,20 +94,37 @@ impl RfDetr {
             config.group_detr,
         )?;
 
-        // TODO: Load transformer
+        // Load transformer
         // Weight path: transformer.*
+        let dim_feedforward = 2048; // Standard for RF-DETR
+        let transformer = Transformer::load(
+            config.hidden_dim,
+            config.sa_nheads,
+            config.ca_nheads,
+            config.num_queries,
+            config.dec_layers,
+            dim_feedforward,
+            config.num_feature_levels(),
+            config.dec_n_points,
+            config.lite_refpoint_refine,
+            config.bbox_reparam,
+            config.num_classes,
+            vb.pp("transformer"),
+        )?;
 
-        // TODO: Load class_embed
+        // Load class_embed
         // Weight path: class_embed.*
+        let class_embed = linear(config.hidden_dim, config.num_classes, vb.pp("class_embed"))?;
 
-        // TODO: Load bbox_embed
+        // Load bbox_embed
         // Weight path: bbox_embed.*
-
-        // TODO: Load refpoint_embed
-        // Weight path: refpoint_embed.*
-
-        // TODO: Load query_feat
-        // Weight path: query_feat.*
+        let bbox_embed = Mlp::load(
+            config.hidden_dim,
+            config.hidden_dim,
+            4,
+            3,
+            vb.pp("bbox_embed"),
+        )?;
 
         Ok(Self {
             config: config.clone(),
@@ -109,6 +132,9 @@ impl RfDetr {
             projector,
             position_encoding,
             query_embeddings,
+            transformer,
+            class_embed,
+            bbox_embed,
         })
     }
 
@@ -174,24 +200,72 @@ impl RfDetr {
         Ok(pos_encodings)
     }
 
+    /// Run transformer forward pass (steps 09-12)
+    ///
+    /// # Arguments
+    /// * `projector_outputs` - Feature maps from projector
+    /// * `position_encodings` - Position encodings
+    ///
+    /// # Returns
+    /// (decoder_hs, decoder_ref, encoder_hs, encoder_ref)
+    pub fn transformer_forward(
+        &self,
+        projector_outputs: &[Tensor],
+        position_encodings: &[Tensor],
+    ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
+        self.transformer.forward(
+            projector_outputs,
+            position_encodings,
+            self.query_embeddings.refpoint_embed(),
+            self.query_embeddings.query_feat(),
+        )
+    }
+
     /// Run full inference on an input image
     ///
     /// # Arguments
     /// * `pixel_values` - Preprocessed input tensor [batch_size, 3, height, width]
     ///
     /// # Returns
-    /// Tuple of (class_logits, bbox_predictions)
+    /// Tuple of (class_logits, bbox_predictions) where:
+    /// - class_logits: [batch_size, num_queries, num_classes]
+    /// - bbox_predictions: [batch_size, num_queries, 4] in (cx, cy, w, h) format
     pub fn forward(&self, pixel_values: &Tensor) -> Result<(Tensor, Tensor)> {
-        // Steps 4-5: Backbone encoder + projector
+        // Steps 04-05: Backbone encoder + projector
         let projector_outputs = self.backbone_forward(pixel_values)?;
 
-        // Step 6: Position encoding
-        let _position_encodings =
+        // Step 06: Position encoding
+        let position_encodings =
             self.compute_position_encodings(&projector_outputs, pixel_values.device())?;
 
-        // TODO: Step 7-12: Transformer decoder
-        // TODO: Step 13-17: Class and bbox predictions
+        // Steps 09-12: Transformer
+        let (decoder_hs, decoder_ref, _encoder_hs, _encoder_ref) =
+            self.transformer_forward(&projector_outputs, &position_encodings)?;
 
-        todo!("Full forward pass not yet implemented")
+        // Steps 13-17: Class and bbox predictions
+        // Bbox prediction with reparameterization
+        let outputs_coord = if self.config.bbox_reparam {
+            let outputs_coord_delta = self.bbox_embed.forward(&decoder_hs)?;
+
+            let ref_xy = decoder_ref.narrow(candle_core::D::Minus1, 0, 2)?;
+            let ref_wh = decoder_ref.narrow(candle_core::D::Minus1, 2, 2)?;
+            let delta_xy = outputs_coord_delta.narrow(candle_core::D::Minus1, 0, 2)?;
+            let delta_wh = outputs_coord_delta.narrow(candle_core::D::Minus1, 2, 2)?;
+
+            let outputs_coord_cxcy = delta_xy.mul(&ref_wh)?.add(&ref_xy)?;
+            let outputs_coord_wh = delta_wh.exp()?.mul(&ref_wh)?;
+            Tensor::cat(
+                &[&outputs_coord_cxcy, &outputs_coord_wh],
+                candle_core::D::Minus1,
+            )?
+        } else {
+            let bbox_delta = self.bbox_embed.forward(&decoder_hs)?;
+            candle_nn::ops::sigmoid(&(bbox_delta + &decoder_ref)?)?
+        };
+
+        // Classification
+        let outputs_class = self.class_embed.forward(&decoder_hs)?;
+
+        Ok((outputs_class, outputs_coord))
     }
 }

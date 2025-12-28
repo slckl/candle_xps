@@ -17,6 +17,7 @@ mod pos_enc;
 mod preprocess;
 mod projector;
 mod query_embed;
+mod transformer;
 
 use candle_core::{DType, Device, Result};
 use candle_nn::VarBuilder;
@@ -194,6 +195,7 @@ fn predict(
     image_path: &str,
     config: &RfDetrConfig,
     device: &Device,
+    confidence_threshold: f32,
 ) -> anyhow::Result<Vec<Detection>> {
     println!("Preprocessing image...");
 
@@ -206,61 +208,76 @@ fn predict(
     println!("  Batch tensor shape: {:?}", batch_tensor.dims());
     println!("  Original image size: {}x{}", w_orig, h_orig);
 
-    // Step 04: Run backbone encoder
-    println!("Running backbone encoder...");
-    let encoder_outputs = model.backbone_encoder_forward(&batch_tensor)?;
+    // Run full model forward pass
+    println!("Running model inference...");
+    let (class_logits, bbox_predictions) = model.forward(&batch_tensor)?;
+
+    println!("  class_logits shape: {:?}", class_logits.dims());
+    println!("  bbox_predictions shape: {:?}", bbox_predictions.dims());
+
+    // Post-process: convert to detections
+    println!("Post-processing...");
+
+    // Apply sigmoid to class logits to get probabilities
+    let class_probs = candle_nn::ops::sigmoid(&class_logits)?;
+
+    // Get max class and score for each query
+    let (num_queries, num_classes) = (class_probs.dim(1)?, class_probs.dim(2)?);
+
+    // Squeeze batch dimension
+    let class_probs = class_probs.squeeze(0)?; // [num_queries, num_classes]
+    let bbox_predictions = bbox_predictions.squeeze(0)?; // [num_queries, 4]
+
+    // Get max scores and class ids
+    let max_scores = class_probs.max(1)?; // [num_queries]
+    let max_class_ids = class_probs.argmax(1)?; // [num_queries]
+
+    // Convert to vectors
+    let scores: Vec<f32> = max_scores.to_vec1()?;
+    let class_ids: Vec<u32> = max_class_ids.to_vec1()?;
+    let bboxes: Vec<f32> = bbox_predictions.flatten_all()?.to_vec1()?;
+
+    // Convert boxes from (cx, cy, w, h) normalized to (x1, y1, x2, y2) pixel coordinates
+    let mut detections = Vec::new();
+    for i in 0..num_queries {
+        let score = scores[i];
+        if score < confidence_threshold {
+            continue;
+        }
+
+        let class_id = class_ids[i] as usize;
+        // Skip background class (class 0 in COCO is typically background)
+        if class_id == 0 {
+            continue;
+        }
+
+        let cx = bboxes[i * 4] * w_orig as f32;
+        let cy = bboxes[i * 4 + 1] * h_orig as f32;
+        let w = bboxes[i * 4 + 2] * w_orig as f32;
+        let h = bboxes[i * 4 + 3] * h_orig as f32;
+
+        let x1 = cx - w / 2.0;
+        let y1 = cy - h / 2.0;
+        let x2 = cx + w / 2.0;
+        let y2 = cy + h / 2.0;
+
+        detections.push(Detection {
+            bbox: [x1, y1, x2, y2],
+            score,
+            class_id,
+        });
+    }
+
+    // Sort by score descending
+    detections.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
 
     println!(
-        "  Backbone encoder outputs: {} feature maps",
-        encoder_outputs.len()
+        "  Found {} detections above threshold {}",
+        detections.len(),
+        confidence_threshold
     );
-    for (i, feat) in encoder_outputs.iter().enumerate() {
-        let stats = TensorStats::from_tensor(feat)?;
-        println!("  Output {}: shape={:?}", i, stats.shape);
-        stats.print(&format!("    04_backbone_encoder_output_{}", i));
-    }
 
-    // Step 05: Run projector
-    println!("Running projector...");
-    let projector_outputs = model.projector_forward(&encoder_outputs)?;
-
-    println!(
-        "  Projector outputs: {} feature maps",
-        projector_outputs.len()
-    );
-    for (i, feat) in projector_outputs.iter().enumerate() {
-        let stats = TensorStats::from_tensor(feat)?;
-        println!("  Output {}: shape={:?}", i, stats.shape);
-        stats.print(&format!("    05_backbone_projector_output_{}", i));
-    }
-
-    // Step 06: Compute position encodings
-    println!("Computing position encodings...");
-    let position_encodings = model.compute_position_encodings(&projector_outputs, device)?;
-
-    println!("  Position encodings: {} tensors", position_encodings.len());
-    for (i, pos) in position_encodings.iter().enumerate() {
-        let stats = TensorStats::from_tensor(pos)?;
-        println!("  Position encoding {}: shape={:?}", i, stats.shape);
-        stats.print(&format!("    06_position_encoding_{}", i));
-    }
-
-    // Steps 07-08: Get query embeddings
-    println!("Query embeddings:");
-    let query_embeddings = model.query_embeddings();
-
-    let refpoint_embed = query_embeddings.refpoint_embed();
-    let stats = TensorStats::from_tensor(refpoint_embed)?;
-    println!("  refpoint_embed: shape={:?}", stats.shape);
-    stats.print("    07_refpoint_embed");
-
-    let query_feat = query_embeddings.query_feat();
-    let stats = TensorStats::from_tensor(query_feat)?;
-    println!("  query_feat: shape={:?}", stats.shape);
-    stats.print("    08_query_feat");
-
-    // TODO: Steps 09+: Run through rest of model
-    todo!("Full model inference not yet implemented")
+    Ok(detections)
 }
 
 pub fn main() -> anyhow::Result<()> {
@@ -276,6 +293,7 @@ pub fn main() -> anyhow::Result<()> {
     println!("  Resolution: {}", config.resolution);
     println!("  Hidden dim: {}", config.hidden_dim);
     println!("  Decoder layers: {}", config.dec_layers);
+    println!("  Num classes: {}", config.num_classes);
 
     // Load model weights
     let model_path = args.model_path()?;
@@ -295,6 +313,29 @@ pub fn main() -> anyhow::Result<()> {
     let model = RfDetr::load(vb, &config)?;
     println!("Model loaded successfully");
 
-    let _detections = predict(&model, &args.image, &config, &device)?;
-    todo!("annotation");
+    let detections = predict(
+        &model,
+        &args.image,
+        &config,
+        &device,
+        args.confidence_threshold,
+    )?;
+
+    if detections.is_empty() {
+        println!("No detections found.");
+        return Ok(());
+    }
+
+    // Load original image for annotation
+    let img = image::ImageReader::open(&args.image)?.decode()?;
+
+    // Draw detections
+    let annotated = draw_detections(img, &detections, args.legend_size)?;
+
+    // Save output
+    let output_path = format!("{}.out.jpg", args.image);
+    annotated.save(&output_path)?;
+    println!("Annotated image saved to: {}", output_path);
+
+    Ok(())
 }
