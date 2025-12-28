@@ -2,11 +2,12 @@
 //!
 //! This module provides the main RF-DETR model structure and loading functionality.
 
-use candle_core::{Result, Tensor};
+use candle_core::{Device, Result, Tensor};
 use candle_nn::VarBuilder;
 
 use crate::config::RfDetrConfig;
 use crate::dino2::{DinoV2Encoder, Dinov2Config};
+use crate::pos_enc::PositionEmbeddingSine;
 use crate::projector::{MultiScaleProjector, ProjectorConfig};
 
 /// RF-DETR Object Detection Model
@@ -22,6 +23,9 @@ pub struct RfDetr {
 
     /// Feature projector (multi-scale)
     projector: MultiScaleProjector,
+
+    /// Position encoding generator
+    position_encoding: PositionEmbeddingSine,
     // TODO: Add remaining model components
     // - transformer decoder
     // - class embedding head
@@ -71,6 +75,9 @@ impl RfDetr {
         let projector =
             MultiScaleProjector::load(vb.pp("backbone.0.projector"), &projector_config)?;
 
+        // Create position encoding (no weights to load - computed from formula)
+        let position_encoding = PositionEmbeddingSine::for_rf_detr(config.hidden_dim);
+
         // TODO: Load transformer
         // Weight path: transformer.*
 
@@ -90,6 +97,7 @@ impl RfDetr {
             config: config.clone(),
             backbone_encoder,
             projector,
+            position_encoding,
         })
     }
 
@@ -127,6 +135,29 @@ impl RfDetr {
         self.projector_forward(&encoder_outputs)
     }
 
+    /// Compute position encodings for feature maps
+    ///
+    /// # Arguments
+    /// * `feature_maps` - Vector of feature maps from projector
+    ///
+    /// # Returns
+    /// A vector of position encodings, each with shape [batch_size, hidden_dim, h, w]
+    pub fn compute_position_encodings(
+        &self,
+        feature_maps: &[Tensor],
+        device: &Device,
+    ) -> Result<Vec<Tensor>> {
+        let mut pos_encodings = Vec::with_capacity(feature_maps.len());
+        for feat in feature_maps {
+            let (batch_size, _channels, height, width) = feat.dims4()?;
+            let pos = self
+                .position_encoding
+                .forward(batch_size, height, width, device)?;
+            pos_encodings.push(pos);
+        }
+        Ok(pos_encodings)
+    }
+
     /// Run full inference on an input image
     ///
     /// # Arguments
@@ -136,9 +167,12 @@ impl RfDetr {
     /// Tuple of (class_logits, bbox_predictions)
     pub fn forward(&self, pixel_values: &Tensor) -> Result<(Tensor, Tensor)> {
         // Steps 4-5: Backbone encoder + projector
-        let _projector_outputs = self.backbone_forward(pixel_values)?;
+        let projector_outputs = self.backbone_forward(pixel_values)?;
 
-        // TODO: Step 6: Position encoding
+        // Step 6: Position encoding
+        let _position_encodings =
+            self.compute_position_encodings(&projector_outputs, pixel_values.device())?;
+
         // TODO: Step 7-12: Transformer decoder
         // TODO: Step 13-17: Class and bbox predictions
 

@@ -13,6 +13,7 @@ mod config;
 mod detection;
 mod dino2;
 mod model;
+mod pos_enc;
 mod preprocess;
 mod projector;
 
@@ -232,7 +233,18 @@ fn predict(
         stats.print(&format!("    05_backbone_projector_output_{}", i));
     }
 
-    // TODO: Steps 06+: Run through rest of model
+    // Step 06: Compute position encodings
+    println!("Computing position encodings...");
+    let position_encodings = model.compute_position_encodings(&projector_outputs, device)?;
+
+    println!("  Position encodings: {} tensors", position_encodings.len());
+    for (i, pos) in position_encodings.iter().enumerate() {
+        let stats = TensorStats::from_tensor(pos)?;
+        println!("  Position encoding {}: shape={:?}", i, stats.shape);
+        stats.print(&format!("    06_position_encoding_{}", i));
+    }
+
+    // TODO: Steps 07+: Run through rest of model
     todo!("Full model inference not yet implemented")
 }
 
