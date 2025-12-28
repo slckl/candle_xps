@@ -8,5 +8,7 @@ target
 # test assets
 py/rfdetr/*.jpg
 py/rfdetr/output
+py/rfdetr/export
 *.pth
 *.safetensors
+*.onnx

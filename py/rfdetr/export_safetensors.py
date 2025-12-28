@@ -105,7 +105,7 @@ def main():
         list_model_keys(args.model)
         return
 
-    output_dir = "./output"
+    output_dir = "./export"
     os.makedirs(output_dir, exist_ok=True)
 
     # Load model

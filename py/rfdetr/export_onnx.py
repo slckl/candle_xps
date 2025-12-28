@@ -36,7 +36,7 @@ def parse_args():
 
 
 args = parse_args()
-output_dir = "./output"
+output_dir = "./export"
 start_time = time.time()
 model_cls = MODEL_CLASSES[args.model]
 model = model_cls()
