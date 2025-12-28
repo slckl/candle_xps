@@ -1,11 +1,7 @@
-import io
+import argparse
 import os
 import shutil
 import time
-
-import requests
-import supervision as sv
-from PIL import Image
 
 from rfdetr import (
     RFDETRBase,
@@ -15,14 +11,35 @@ from rfdetr import (
     RFDETRSegPreview,
     RFDETRSmall,
 )
-from rfdetr.util.coco_classes import COCO_CLASSES
 
-# This also downloads model, if it's not present in working directory of script.
+MODEL_CLASSES = {
+    "nano": RFDETRNano,
+    "small": RFDETRSmall,
+    "medium": RFDETRMedium,
+    "base": RFDETRBase,
+    "large": RFDETRLarge,
+    "seg": RFDETRSegPreview,
+}
 
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Export RF-DETR model to ONNX format")
+    parser.add_argument(
+        "--model",
+        "-m",
+        type=str,
+        default="small",
+        choices=list(MODEL_CLASSES.keys()),
+        help=f"Model size to export. Available: {', '.join(MODEL_CLASSES.keys())} (default: small)",
+    )
+    return parser.parse_args()
+
+
+args = parse_args()
 output_dir = "./output"
 start_time = time.time()
-# model = RFDETRMedium()
-model = RFDETRSmall()
+model_cls = MODEL_CLASSES[args.model]
+model = model_cls()
 model_name = model.size
 print(f"Loaded model: {model_name}")
 model_load_time = time.time() - start_time
