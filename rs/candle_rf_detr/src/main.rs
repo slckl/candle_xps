@@ -12,8 +12,9 @@ mod coco_classes;
 mod config;
 mod detection;
 mod model;
+mod preprocess;
 
-use candle_core::{DType, Device, Result, Tensor};
+use candle_core::{DType, Device, Result};
 use candle_nn::VarBuilder;
 use clap::{Parser, ValueEnum};
 use image::DynamicImage;
@@ -184,8 +185,25 @@ fn draw_detections(
 }
 
 /// Run inference on a single image
-fn predict(model: &RfDetr, image_path: &str, device: &Device) -> anyhow::Result<Vec<Detection>> {
-    todo!()
+fn predict(
+    _model: &RfDetr,
+    image_path: &str,
+    config: &RfDetrConfig,
+    device: &Device,
+) -> anyhow::Result<Vec<Detection>> {
+    println!("Preprocessing image...");
+
+    // Steps 01-03: Load, normalize, and resize image
+    let (preprocessed, h_orig, w_orig) =
+        preprocess::preprocess_image(image_path, config.resolution, device)?;
+
+    // Add batch dimension: [3, H, W] -> [1, 3, H, W]
+    let batch_tensor = preprocess::add_batch_dim(&preprocessed)?;
+    println!("  Batch tensor shape: {:?}", batch_tensor.dims());
+    println!("  Original image size: {}x{}", w_orig, h_orig);
+
+    // TODO: Steps 04+: Run through model
+    todo!("Model inference not yet implemented")
 }
 
 pub fn main() -> anyhow::Result<()> {
@@ -220,8 +238,6 @@ pub fn main() -> anyhow::Result<()> {
     let model = RfDetr::load(vb, &config)?;
     println!("Model loaded successfully");
 
-    let detections = predict(&model, &args.image, &device)?;
+    let _detections = predict(&model, &args.image, &config, &device)?;
     todo!("annotation");
-
-    Ok(())
 }
