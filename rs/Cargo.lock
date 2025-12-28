@@ -320,10 +320,36 @@ checksum = "b35204fbdc0b3f4446b89fc1ac2cf84a8a68971995d0bf2e925ec7cd960f9cb3"
 [[package]]
 name = "candle-core"
 version = "0.9.2-alpha.2"
+source = "git+https://github.com/slckl/candle.git?rev=7e6fb8b#7e6fb8b0a4fe470fde952122caef41ce0e53b297"
+dependencies = [
+ "byteorder",
+ "candle-kernels 0.9.2-alpha.2 (git+https://github.com/slckl/candle.git?rev=7e6fb8b)",
+ "cudarc 0.18.2",
+ "float8 0.5.0",
+ "gemm",
+ "half",
+ "libm",
+ "memmap2",
+ "num-traits",
+ "num_cpus",
+ "rand 0.9.2",
+ "rand_distr 0.5.1",
+ "rayon",
+ "safetensors 0.6.2",
+ "thiserror 1.0.69",
+ "ug",
+ "ug-cuda",
+ "yoke 0.7.5",
+ "zip 1.1.4",
+]
+
+[[package]]
+name = "candle-core"
+version = "0.9.2-alpha.2"
 source = "git+https://github.com/slckl/candle.git#63437a48c279b6781225c38ac2a8f1c4d8c11220"
 dependencies = [
  "byteorder",
- "candle-kernels",
+ "candle-kernels 0.9.2-alpha.2 (git+https://github.com/slckl/candle.git)",
  "cudarc 0.18.2",
  "float8 0.5.0",
  "gemm",
@@ -346,6 +372,14 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.9.2-alpha.2"
+source = "git+https://github.com/slckl/candle.git?rev=7e6fb8b#7e6fb8b0a4fe470fde952122caef41ce0e53b297"
+dependencies = [
+ "bindgen_cuda",
+]
+
+[[package]]
+name = "candle-kernels"
+version = "0.9.2-alpha.2"
 source = "git+https://github.com/slckl/candle.git#63437a48c279b6781225c38ac2a8f1c4d8c11220"
 dependencies = [
  "bindgen_cuda",
@@ -354,9 +388,24 @@ dependencies = [
 [[package]]
 name = "candle-nn"
 version = "0.9.2-alpha.2"
+source = "git+https://github.com/slckl/candle.git?rev=7e6fb8b#7e6fb8b0a4fe470fde952122caef41ce0e53b297"
+dependencies = [
+ "candle-core 0.9.2-alpha.2 (git+https://github.com/slckl/candle.git?rev=7e6fb8b)",
+ "half",
+ "libc",
+ "num-traits",
+ "rayon",
+ "safetensors 0.6.2",
+ "serde",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "candle-nn"
+version = "0.9.2-alpha.2"
 source = "git+https://github.com/slckl/candle.git#63437a48c279b6781225c38ac2a8f1c4d8c11220"
 dependencies = [
- "candle-core",
+ "candle-core 0.9.2-alpha.2 (git+https://github.com/slckl/candle.git)",
  "half",
  "libc",
  "num-traits",
@@ -369,11 +418,29 @@ dependencies = [
 [[package]]
 name = "candle-transformers"
 version = "0.9.2-alpha.2"
+source = "git+https://github.com/slckl/candle.git?rev=7e6fb8b#7e6fb8b0a4fe470fde952122caef41ce0e53b297"
+dependencies = [
+ "byteorder",
+ "candle-core 0.9.2-alpha.2 (git+https://github.com/slckl/candle.git?rev=7e6fb8b)",
+ "candle-nn 0.9.2-alpha.2 (git+https://github.com/slckl/candle.git?rev=7e6fb8b)",
+ "fancy-regex",
+ "num-traits",
+ "rand 0.9.2",
+ "rayon",
+ "serde",
+ "serde_json",
+ "serde_plain",
+ "tracing",
+]
+
+[[package]]
+name = "candle-transformers"
+version = "0.9.2-alpha.2"
 source = "git+https://github.com/slckl/candle.git#63437a48c279b6781225c38ac2a8f1c4d8c11220"
 dependencies = [
  "byteorder",
- "candle-core",
- "candle-nn",
+ "candle-core 0.9.2-alpha.2 (git+https://github.com/slckl/candle.git)",
+ "candle-nn 0.9.2-alpha.2 (git+https://github.com/slckl/candle.git)",
  "fancy-regex",
  "num-traits",
  "rand 0.9.2",
@@ -389,8 +456,8 @@ name = "candle_conv"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "candle-core",
- "candle-nn",
+ "candle-core 0.9.2-alpha.2 (git+https://github.com/slckl/candle.git)",
+ "candle-nn 0.9.2-alpha.2 (git+https://github.com/slckl/candle.git)",
 ]
 
 [[package]]
@@ -399,9 +466,9 @@ version = "0.1.0"
 dependencies = [
  "ab_glyph",
  "anyhow",
- "candle-core",
- "candle-nn",
- "candle-transformers",
+ "candle-core 0.9.2-alpha.2 (git+https://github.com/slckl/candle.git?rev=7e6fb8b)",
+ "candle-nn 0.9.2-alpha.2 (git+https://github.com/slckl/candle.git?rev=7e6fb8b)",
+ "candle-transformers 0.9.2-alpha.2 (git+https://github.com/slckl/candle.git?rev=7e6fb8b)",
  "clap",
  "hf-hub",
  "image",
@@ -416,9 +483,9 @@ version = "0.1.0"
 dependencies = [
  "ab_glyph",
  "anyhow",
- "candle-core",
- "candle-nn",
- "candle-transformers",
+ "candle-core 0.9.2-alpha.2 (git+https://github.com/slckl/candle.git)",
+ "candle-nn 0.9.2-alpha.2 (git+https://github.com/slckl/candle.git)",
+ "candle-transformers 0.9.2-alpha.2 (git+https://github.com/slckl/candle.git)",
  "clap",
  "hf-hub",
  "image",

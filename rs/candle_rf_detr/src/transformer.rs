@@ -1226,13 +1226,7 @@ impl Transformer {
             let class_scores = enc_outputs_class.max(D::Minus1)?;
 
             // Argsort to get top-k indices
-            // WORKAROUND: CUDA sort_last_dim kernel has issues with non-power-of-2 sizes
-            // (e.g., 1296 = 36^2 for medium model's 576px resolution).
-            // Move to CPU for sort, then back to original device.
-            let original_device = class_scores.device().clone();
-            let class_scores_cpu = class_scores.to_device(&candle_core::Device::Cpu)?;
-            let (_, topk_indices_cpu) = class_scores_cpu.sort_last_dim(false)?;
-            let topk_indices = topk_indices_cpu.to_device(&original_device)?;
+            let (_, topk_indices) = class_scores.sort_last_dim(false)?;
             let topk_indices = topk_indices.narrow(1, 0, topk)?;
 
             // Gather top-k proposals
