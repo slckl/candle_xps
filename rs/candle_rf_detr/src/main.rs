@@ -9,6 +9,7 @@ extern crate intel_mkl_src;
 extern crate accelerate_src;
 
 mod coco_classes;
+mod coco_eval;
 mod config;
 mod detection;
 mod dino2;
