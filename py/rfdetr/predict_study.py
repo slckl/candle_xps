@@ -91,7 +91,10 @@ def predict_with_debug(model, image, threshold=0.5, debug_dir: Optional[str] = N
     if debug_dir:
         dump_tensor(img_tensor, debug_dir, "02_input_image_normalized")
 
-    img_tensor = F.resize(img_tensor, (model.model.resolution, model.model.resolution))
+    # Use antialias=False to match Candle's upsample_bilinear2d behavior
+    img_tensor = F.resize(
+        img_tensor, (model.model.resolution, model.model.resolution), antialias=False
+    )
 
     if debug_dir:
         dump_tensor(img_tensor, debug_dir, "03_input_image_resized")
