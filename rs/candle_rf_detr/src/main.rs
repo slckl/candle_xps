@@ -132,6 +132,46 @@ impl Args {
     }
 }
 
+/// Color palette for different classes (similar to supervision library's default palette)
+/// These are vibrant, distinguishable colors
+const CLASS_COLORS: [[u8; 3]; 20] = [
+    [255, 64, 64],   // red
+    [255, 161, 54],  // orange
+    [255, 221, 51],  // yellow
+    [170, 255, 50],  // lime
+    [50, 255, 50],   // green
+    [50, 255, 170],  // mint
+    [50, 255, 255],  // cyan
+    [50, 170, 255],  // sky blue
+    [50, 50, 255],   // blue
+    [161, 50, 255],  // purple
+    [255, 50, 255],  // magenta
+    [255, 50, 161],  // pink
+    [128, 128, 255], // light blue
+    [255, 128, 128], // light red
+    [128, 255, 128], // light green
+    [255, 255, 128], // light yellow
+    [128, 255, 255], // light cyan
+    [255, 128, 255], // light magenta
+    [192, 192, 192], // silver
+    [255, 200, 100], // peach
+];
+
+/// Get a color for a given class ID
+fn get_class_color(class_id: usize) -> image::Rgb<u8> {
+    let color = CLASS_COLORS[class_id % CLASS_COLORS.len()];
+    image::Rgb(color)
+}
+
+/// Get a darker version of a color for the label background
+fn get_darker_color(color: image::Rgb<u8>) -> image::Rgb<u8> {
+    image::Rgb([
+        (color.0[0] as u16 * 2 / 3) as u8,
+        (color.0[1] as u16 * 2 / 3) as u8,
+        (color.0[2] as u16 * 2 / 3) as u8,
+    ])
+}
+
 /// Draw detections on an image
 fn draw_detections(
     img: DynamicImage,
@@ -156,12 +196,16 @@ fn draw_detections(
         let dx = (x2 - det.bbox[0]).max(0.0) as u32;
         let dy = (y2 - det.bbox[1]).max(0.0) as u32;
 
+        // Get color based on class
+        let box_color = get_class_color(det.class_id);
+        let label_bg_color = get_darker_color(box_color);
+
         // Draw bounding box
         if dx > 0 && dy > 0 {
             imageproc::drawing::draw_hollow_rect_mut(
                 &mut img,
                 imageproc::rect::Rect::at(x1, y1).of_size(dx, dy),
-                image::Rgb([255, 0, 0]),
+                box_color,
             );
         }
 
@@ -170,7 +214,7 @@ fn draw_detections(
             imageproc::drawing::draw_filled_rect_mut(
                 &mut img,
                 imageproc::rect::Rect::at(x1, y1).of_size(dx, legend_size),
-                image::Rgb([170, 0, 0]),
+                label_bg_color,
             );
             let legend = format!("{} {:.0}%", class_name, 100.0 * det.score);
             imageproc::drawing::draw_text_mut(
