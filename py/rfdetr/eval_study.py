@@ -22,7 +22,6 @@ Usage:
 
 import argparse
 import json
-import pickle
 import time
 from pathlib import Path
 
@@ -157,7 +156,7 @@ class Args:
 
 def save_predictions(predictions: dict, output_dir: Path, model_name: str):
     """
-    Save predictions to disk for later analysis.
+    Save predictions to disk in JSON format for later analysis.
 
     Args:
         predictions: Dict mapping image_id to prediction results
@@ -166,14 +165,23 @@ def save_predictions(predictions: dict, output_dir: Path, model_name: str):
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Save as pickle for exact reproduction
-    pkl_path = output_dir / f"predictions_{model_name}.pkl"
-    with open(pkl_path, "wb") as f:
-        pickle.dump(predictions, f)
-    print(f"Saved predictions to: {pkl_path}")
+    # Convert predictions to JSON-serializable format
+    json_predictions = {}
+    for img_id, pred in predictions.items():
+        json_predictions[str(img_id)] = {
+            "scores": pred["scores"].tolist(),
+            "labels": pred["labels"].tolist(),
+            "boxes": pred["boxes"].tolist(),
+        }
 
-    # Also save a JSON summary for human inspection
-    json_path = output_dir / f"predictions_{model_name}_summary.json"
+    # Save full predictions as JSON
+    json_path = output_dir / f"predictions_{model_name}.json"
+    with open(json_path, "w") as f:
+        json.dump(json_predictions, f)
+    print(f"Saved predictions to: {json_path}")
+
+    # Also save a human-readable summary
+    summary_path = output_dir / f"predictions_{model_name}_summary.json"
     summary = {
         "num_images": len(predictions),
         "image_ids": sorted(predictions.keys()),
@@ -191,9 +199,9 @@ def save_predictions(predictions: dict, output_dir: Path, model_name: str):
             "boxes": pred["boxes"][:10].tolist() if len(pred["boxes"]) > 0 else [],
         }
 
-    with open(json_path, "w") as f:
+    with open(summary_path, "w") as f:
         json.dump(summary, f, indent=2)
-    print(f"Saved prediction summary to: {json_path}")
+    print(f"Saved prediction summary to: {summary_path}")
 
 
 def load_predictions(output_dir: Path, model_name: str) -> dict:
@@ -205,18 +213,31 @@ def load_predictions(output_dir: Path, model_name: str) -> dict:
         model_name: Name of the model
 
     Returns:
-        Dict mapping image_id to prediction results
+        Dict mapping image_id to prediction results (with numpy arrays)
     """
-    pkl_path = output_dir / f"predictions_{model_name}.pkl"
-    if not pkl_path.exists():
+    import numpy as np
+
+    json_path = output_dir / f"predictions_{model_name}.json"
+    if not json_path.exists():
         raise FileNotFoundError(
-            f"Predictions file not found: {pkl_path}\n"
+            f"Predictions file not found: {json_path}\n"
             "Run evaluation without --load-predictions first to generate predictions."
         )
 
-    print(f"Loading predictions from: {pkl_path}")
-    with open(pkl_path, "rb") as f:
-        predictions = pickle.load(f)
+    print(f"Loading predictions from: {json_path}")
+    with open(json_path, "r") as f:
+        json_predictions = json.load(f)
+
+    # Convert back to numpy arrays with integer image IDs
+    predictions = {}
+    for img_id_str, pred in json_predictions.items():
+        img_id = int(img_id_str)
+        predictions[img_id] = {
+            "scores": np.array(pred["scores"], dtype=np.float32),
+            "labels": np.array(pred["labels"], dtype=np.int64),
+            "boxes": np.array(pred["boxes"], dtype=np.float32),
+        }
+
     print(f"Loaded {len(predictions)} image predictions")
     return predictions
 
@@ -410,11 +431,6 @@ def parse_args():
         action="store_true",
         help="Load cached predictions instead of running inference",
     )
-    parser.add_argument(
-        "--save-results",
-        action="store_true",
-        help="Save detailed results to JSON file",
-    )
     return parser.parse_args()
 
 
@@ -544,21 +560,19 @@ def main():
         print(f"  AR (medium)        : {bbox['AR_medium']:.4f}")
         print(f"  AR (large)         : {bbox['AR_large']:.4f}")
 
-    # Save results if requested
-    if args.save_results:
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        results_file = output_dir / f"eval_results_{args.model}.json"
-        results = {
-            "model": args.model,
-            "coco_path": str(args.coco_path),
-            "device": args.device,
-            "fp16": args.fp16,
-            "stats": stats,
-        }
-        with open(results_file, "w") as f:
-            json.dump(results, f, indent=2)
-        print(f"\nResults saved to: {results_file}")
+    # Save evaluation metrics
+    output_dir.mkdir(parents=True, exist_ok=True)
+    results_file = output_dir / f"eval_results_{args.model}.json"
+    results = {
+        "model": args.model,
+        "coco_path": str(args.coco_path),
+        "device": args.device,
+        "fp16": args.fp16,
+        "stats": stats,
+    }
+    with open(results_file, "w") as f:
+        json.dump(results, f, indent=2)
+    print(f"\nEvaluation metrics saved to: {results_file}")
 
     print("\n" + "=" * 60)
     print("Evaluation complete!")
