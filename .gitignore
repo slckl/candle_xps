@@ -12,3 +12,4 @@ py/rfdetr/export
 *.pth
 *.safetensors
 *.onnx
+/datasets
