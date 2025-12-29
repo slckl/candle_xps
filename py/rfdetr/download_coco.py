@@ -6,10 +6,11 @@ import zipfile
 from pathlib import Path
 
 COCO_URLS = {
-    "train2017": "http://images.cocodataset.org/zips/train2017.zip",
+    # "train2017": "http://images.cocodataset.org/zips/train2017.zip",
     "val2017": "http://images.cocodataset.org/zips/val2017.zip",
     "annotations": "http://images.cocodataset.org/annotations/annotations_trainval2017.zip",
 }
+
 
 def download_file(url: str, dest: Path) -> None:
     """Download a file with progress."""
@@ -26,7 +27,11 @@ def download_file(url: str, dest: Path) -> None:
             percent = min(100, downloaded * 100 / total_size)
             mb_downloaded = downloaded / (1024 * 1024)
             mb_total = total_size / (1024 * 1024)
-            print(f"\r  Progress: {percent:.1f}% ({mb_downloaded:.1f}/{mb_total:.1f} MB)", end="", flush=True)
+            print(
+                f"\r  Progress: {percent:.1f}% ({mb_downloaded:.1f}/{mb_total:.1f} MB)",
+                end="",
+                flush=True,
+            )
 
     urllib.request.urlretrieve(url, dest, reporthook=progress_hook)
     print()
@@ -35,7 +40,7 @@ def download_file(url: str, dest: Path) -> None:
 def extract_zip(zip_path: Path, dest_dir: Path) -> None:
     """Extract a zip file."""
     print(f"  Extracting: {zip_path}")
-    with zipfile.ZipFile(zip_path, 'r') as zf:
+    with zipfile.ZipFile(zip_path, "r") as zf:
         zf.extractall(dest_dir)
     print(f"  Done extracting to: {dest_dir}")
 
