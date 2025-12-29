@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use candle_core::{DType, Device, Result};
+use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;
 use clap::Args;
 use image::DynamicImage;
@@ -14,6 +14,18 @@ use crate::detection::Detection;
 use crate::model::RfDetr;
 use crate::preprocess;
 use crate::Which;
+
+/// Raw prediction output before thresholding.
+/// Contains all 300 queries with their scores, labels, and boxes.
+#[derive(Debug, Clone)]
+pub struct RawPrediction {
+    /// Confidence scores for each query (max across classes)
+    pub scores: Vec<f32>,
+    /// Class labels for each query (argmax across classes)
+    pub labels: Vec<i64>,
+    /// Bounding boxes in [x1, y1, x2, y2] pixel coordinates
+    pub boxes: Vec<[f32; 4]>,
+}
 
 /// Arguments for the predict subcommand
 #[derive(Args, Debug)]
@@ -132,44 +144,23 @@ fn draw_detections(
     Ok(DynamicImage::ImageRgb8(img))
 }
 
-/// Run inference on a single image
-fn predict_image(
-    model: &RfDetr,
-    image_path: &str,
-    config: &RfDetrConfig,
-    device: &Device,
-    confidence_threshold: f32,
-) -> anyhow::Result<Vec<Detection>> {
-    println!("Preprocessing image...");
-
-    // Steps 01-03: Load, normalize, and resize image
-    let (preprocessed, h_orig, w_orig) =
-        preprocess::preprocess_image(image_path, config.resolution, device)?;
-
-    // Add batch dimension: [3, H, W] -> [1, 3, H, W]
-    let batch_tensor = preprocess::add_batch_dim(&preprocessed)?;
-    println!("  Batch tensor shape: {:?}", batch_tensor.dims());
-    println!("  Original image size: {}x{}", w_orig, h_orig);
-
-    // Run full model forward pass
-    println!("Running model inference...");
-    let (class_logits, bbox_predictions) = model.forward(&batch_tensor)?;
-
-    println!("  class_logits shape: {:?}", class_logits.dims());
-    println!("  bbox_predictions shape: {:?}", bbox_predictions.dims());
-
-    // Post-process: convert to detections
-    println!("Post-processing...");
-
+/// Post-process model outputs into raw predictions.
+/// Returns all queries (typically 300) without any filtering.
+pub fn postprocess_outputs(
+    class_logits: &Tensor,
+    bbox_predictions: &Tensor,
+    h_orig: usize,
+    w_orig: usize,
+) -> anyhow::Result<RawPrediction> {
     // Apply sigmoid to class logits to get probabilities
-    let class_probs = candle_nn::ops::sigmoid(&class_logits)?;
+    let class_probs = candle_nn::ops::sigmoid(class_logits)?;
 
     // Get max class and score for each query
-    let (num_queries, _num_classes) = (class_probs.dim(1)?, class_probs.dim(2)?);
+    let num_queries = class_probs.dim(1)?;
 
     // Squeeze batch dimension
     let class_probs = class_probs.squeeze(0)?; // [num_queries, num_classes]
-    let bbox_predictions = bbox_predictions.squeeze(0)?; // [num_queries, 4]
+    let bbox_preds = bbox_predictions.squeeze(0)?; // [num_queries, 4]
 
     // Get max scores and class ids
     let max_scores = class_probs.max(1)?; // [num_queries]
@@ -178,21 +169,16 @@ fn predict_image(
     // Convert to vectors
     let scores: Vec<f32> = max_scores.to_vec1()?;
     let class_ids: Vec<u32> = max_class_ids.to_vec1()?;
-    let bboxes: Vec<f32> = bbox_predictions.flatten_all()?.to_vec1()?;
+    let bboxes: Vec<f32> = bbox_preds.flatten_all()?.to_vec1()?;
 
     // Convert boxes from (cx, cy, w, h) normalized to (x1, y1, x2, y2) pixel coordinates
-    let mut detections = Vec::new();
+    let mut result_scores = Vec::with_capacity(num_queries);
+    let mut result_labels = Vec::with_capacity(num_queries);
+    let mut result_boxes = Vec::with_capacity(num_queries);
+
     for i in 0..num_queries {
         let score = scores[i];
-        if score < confidence_threshold {
-            continue;
-        }
-
-        let class_id = class_ids[i] as usize;
-        // Skip background class (class 0 in COCO is typically background)
-        if class_id == 0 {
-            continue;
-        }
+        let class_id = class_ids[i] as i64;
 
         let cx = bboxes[i * 4] * w_orig as f32;
         let cy = bboxes[i * 4 + 1] * h_orig as f32;
@@ -204,8 +190,60 @@ fn predict_image(
         let x2 = cx + w / 2.0;
         let y2 = cy + h / 2.0;
 
+        result_scores.push(score);
+        result_labels.push(class_id);
+        result_boxes.push([x1, y1, x2, y2]);
+    }
+
+    Ok(RawPrediction {
+        scores: result_scores,
+        labels: result_labels,
+        boxes: result_boxes,
+    })
+}
+
+/// Run inference on a single image and return raw predictions (all queries).
+/// This is the core inference function used by both predict and eval.
+pub fn predict_image_raw(
+    model: &RfDetr,
+    image_path: &str,
+    config: &RfDetrConfig,
+    device: &Device,
+) -> anyhow::Result<(RawPrediction, usize, usize)> {
+    // Steps 01-03: Load, normalize, and resize image
+    let (preprocessed, h_orig, w_orig) =
+        preprocess::preprocess_image(image_path, config.resolution, device)?;
+
+    // Add batch dimension: [3, H, W] -> [1, 3, H, W]
+    let batch_tensor = preprocess::add_batch_dim(&preprocessed)?;
+
+    // Run full model forward pass
+    let (class_logits, bbox_predictions) = model.forward(&batch_tensor)?;
+
+    // Post-process
+    let raw_pred = postprocess_outputs(&class_logits, &bbox_predictions, h_orig, w_orig)?;
+
+    Ok((raw_pred, h_orig, w_orig))
+}
+
+/// Filter raw predictions by confidence threshold and skip background class.
+pub fn filter_detections(raw: &RawPrediction, confidence_threshold: f32) -> Vec<Detection> {
+    let mut detections = Vec::new();
+
+    for i in 0..raw.scores.len() {
+        let score = raw.scores[i];
+        if score < confidence_threshold {
+            continue;
+        }
+
+        let class_id = raw.labels[i] as usize;
+        // Skip background class (class 0 in COCO is typically background)
+        if class_id == 0 {
+            continue;
+        }
+
         detections.push(Detection {
-            bbox: [x1, y1, x2, y2],
+            bbox: raw.boxes[i],
             score,
             class_id,
         });
@@ -214,6 +252,25 @@ fn predict_image(
     // Sort by score descending
     detections.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
 
+    detections
+}
+
+/// Run inference on a single image with filtering.
+fn predict_image(
+    model: &RfDetr,
+    image_path: &str,
+    config: &RfDetrConfig,
+    device: &Device,
+    confidence_threshold: f32,
+) -> anyhow::Result<Vec<Detection>> {
+    println!("Preprocessing image...");
+
+    let (raw_pred, h_orig, w_orig) = predict_image_raw(model, image_path, config, device)?;
+
+    println!("  Original image size: {}x{}", w_orig, h_orig);
+
+    let detections = filter_detections(&raw_pred, confidence_threshold);
+
     println!(
         "  Found {} detections above threshold {}",
         detections.len(),
@@ -221,6 +278,26 @@ fn predict_image(
     );
 
     Ok(detections)
+}
+
+/// Load model from path.
+pub fn load_model(
+    model_path: &PathBuf,
+    config: &RfDetrConfig,
+    device: &Device,
+) -> anyhow::Result<RfDetr> {
+    if !model_path.exists() {
+        anyhow::bail!(
+            "Model weights not found at {:?}. Please provide a valid model path with --model, \
+            or ensure the model file exists.\n\
+            You may need to export the PyTorch model to safetensors format first.",
+            model_path
+        );
+    }
+
+    let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[model_path], DType::F32, device)? };
+    let model = RfDetr::load(vb, config)?;
+    Ok(model)
 }
 
 /// Run the predict subcommand
@@ -241,18 +318,8 @@ pub fn run(
     // Load model weights
     println!("Loading model from: {:?}", model_path);
 
-    if !model_path.exists() {
-        anyhow::bail!(
-            "Model weights not found at {:?}. Please provide a valid model path with --model, \
-            or ensure the model file exists.\n\
-            You may need to export the PyTorch model to safetensors format first.",
-            model_path
-        );
-    }
-
     let start = Instant::now();
-    let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[model_path], DType::F32, device)? };
-    let model = RfDetr::load(vb, &config)?;
+    let model = load_model(&model_path, &config, device)?;
     println!("Model loaded successfully in {:?}", start.elapsed());
 
     let start = Instant::now();

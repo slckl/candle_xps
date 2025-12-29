@@ -183,15 +183,12 @@ pub fn preprocess_image(
     // Step 2: Convert to tensor [3, H, W] with values in [0, 1]
     let tensor = image_to_tensor(&img, device)?;
     let (_, h_orig, w_orig) = tensor.dims3()?;
-    print_tensor_stats(&tensor, "01_input_image_raw")?;
 
     // Step 3: Normalize with ImageNet mean/std
     let normalized = normalize(&tensor)?;
-    print_tensor_stats(&normalized, "02_input_image_normalized")?;
 
     // Step 4: Resize to model resolution
     let resized = resize(&normalized, (resolution, resolution))?;
-    print_tensor_stats(&resized, "03_input_image_resized")?;
 
     Ok((resized, h_orig, w_orig))
 }
