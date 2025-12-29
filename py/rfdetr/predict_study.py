@@ -325,13 +325,20 @@ if __name__ == "__main__":
     predict_time = time.time() - start_time
     print(f"Model prediction time: {predict_time:.4f} seconds")
 
+    descriptors = [
+        f"{COCO_CLASSES[class_id]}: {bbox} (conf: {confidence:.2f})"
+        for class_id, bbox, confidence in zip(
+            detections.class_id, detections.xyxy, detections.confidence
+        )
+    ]
+    print(f"{len(descriptors)} objects detected:")
+    for label in descriptors:
+        print(f"  {label}")
+
     labels = [
         f"{COCO_CLASSES[class_id]} {confidence:.2f}"
         for class_id, confidence in zip(detections.class_id, detections.confidence)
     ]
-    print(f"{len(labels)} objects detected:")
-    for label in labels:
-        print(f"  {label}")
 
     annotated_image = image.copy()
     annotated_image = sv.BoxAnnotator().annotate(annotated_image, detections)
