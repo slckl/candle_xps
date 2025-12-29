@@ -154,59 +154,47 @@ class Args:
         self.output_dir = kwargs.get("output_dir", "eval_output")
 
 
+def save_prediction(img_id: int, pred: dict, pred_dir: Path):
+    """
+    Save a single image prediction to disk as JSON.
+
+    Args:
+        img_id: Image ID
+        pred: Prediction dict with scores, labels, boxes
+        pred_dir: Directory to save prediction
+    """
+    json_path = pred_dir / f"{img_id}.json"
+    json_pred = {
+        "image_id": img_id,
+        "scores": pred["scores"].tolist(),
+        "labels": pred["labels"].tolist(),
+        "boxes": pred["boxes"].tolist(),
+    }
+    with open(json_path, "w") as f:
+        json.dump(json_pred, f)
+
+
 def save_predictions(predictions: dict, output_dir: Path, model_name: str):
     """
-    Save predictions to disk in JSON format for later analysis.
+    Save predictions to disk as one JSON per image.
 
     Args:
         predictions: Dict mapping image_id to prediction results
         output_dir: Directory to save predictions
-        model_name: Name of the model (used in filename)
+        model_name: Name of the model (used in directory name)
     """
-    output_dir.mkdir(parents=True, exist_ok=True)
+    pred_dir = output_dir / f"predictions_{model_name}"
+    pred_dir.mkdir(parents=True, exist_ok=True)
 
-    # Convert predictions to JSON-serializable format
-    json_predictions = {}
     for img_id, pred in predictions.items():
-        json_predictions[str(img_id)] = {
-            "scores": pred["scores"].tolist(),
-            "labels": pred["labels"].tolist(),
-            "boxes": pred["boxes"].tolist(),
-        }
+        save_prediction(img_id, pred, pred_dir)
 
-    # Save full predictions as JSON
-    json_path = output_dir / f"predictions_{model_name}.json"
-    with open(json_path, "w") as f:
-        json.dump(json_predictions, f)
-    print(f"Saved predictions to: {json_path}")
-
-    # Also save a human-readable summary
-    summary_path = output_dir / f"predictions_{model_name}_summary.json"
-    summary = {
-        "num_images": len(predictions),
-        "image_ids": sorted(predictions.keys()),
-        "sample_predictions": {},
-    }
-
-    # Include a few sample predictions for inspection
-    sample_ids = sorted(predictions.keys())[:5]
-    for img_id in sample_ids:
-        pred = predictions[img_id]
-        summary["sample_predictions"][img_id] = {
-            "num_detections": len(pred["scores"]),
-            "scores": pred["scores"][:10].tolist() if len(pred["scores"]) > 0 else [],
-            "labels": pred["labels"][:10].tolist() if len(pred["labels"]) > 0 else [],
-            "boxes": pred["boxes"][:10].tolist() if len(pred["boxes"]) > 0 else [],
-        }
-
-    with open(summary_path, "w") as f:
-        json.dump(summary, f, indent=2)
-    print(f"Saved prediction summary to: {summary_path}")
+    print(f"Saved {len(predictions)} predictions to: {pred_dir}")
 
 
 def load_predictions(output_dir: Path, model_name: str) -> dict:
     """
-    Load predictions from disk.
+    Load predictions from disk (one JSON per image).
 
     Args:
         output_dir: Directory containing saved predictions
@@ -217,21 +205,21 @@ def load_predictions(output_dir: Path, model_name: str) -> dict:
     """
     import numpy as np
 
-    json_path = output_dir / f"predictions_{model_name}.json"
-    if not json_path.exists():
+    pred_dir = output_dir / f"predictions_{model_name}"
+    if not pred_dir.exists():
         raise FileNotFoundError(
-            f"Predictions file not found: {json_path}\n"
+            f"Predictions directory not found: {pred_dir}\n"
             "Run evaluation without --load-predictions first to generate predictions."
         )
 
-    print(f"Loading predictions from: {json_path}")
-    with open(json_path, "r") as f:
-        json_predictions = json.load(f)
+    print(f"Loading predictions from: {pred_dir}")
 
-    # Convert back to numpy arrays with integer image IDs
     predictions = {}
-    for img_id_str, pred in json_predictions.items():
-        img_id = int(img_id_str)
+    json_files = list(pred_dir.glob("*.json"))
+    for json_path in json_files:
+        with open(json_path, "r") as f:
+            pred = json.load(f)
+        img_id = pred["image_id"]
         predictions[img_id] = {
             "scores": np.array(pred["scores"], dtype=np.float32),
             "labels": np.array(pred["labels"], dtype=np.int64),
@@ -255,6 +243,10 @@ def run_inference(
 
     if args.fp16_eval:
         model.half()
+
+    # Create predictions directory
+    pred_dir = output_dir / f"predictions_{model_name}"
+    pred_dir.mkdir(parents=True, exist_ok=True)
 
     all_predictions = {}
     num_batches = len(data_loader)
@@ -281,15 +273,18 @@ def run_inference(
         orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
         results = postprocess(outputs, orig_target_sizes)
 
-        # Store predictions for each image
+        # Store and save predictions for each image
         for target, result in zip(targets, results):
             img_id = target["image_id"].item()
             # Convert tensors to CPU numpy for storage
-            all_predictions[img_id] = {
+            pred = {
                 "scores": result["scores"].cpu().numpy(),
                 "labels": result["labels"].cpu().numpy(),
                 "boxes": result["boxes"].cpu().numpy(),
             }
+            all_predictions[img_id] = pred
+            # Save immediately
+            save_prediction(img_id, pred, pred_dir)
 
         processed += len(targets)
         if (batch_idx + 1) % 100 == 0 or batch_idx == num_batches - 1:
@@ -304,9 +299,7 @@ def run_inference(
     print(
         f"\nInference completed in {total_time:.1f}s ({processed / total_time:.1f} img/s)"
     )
-
-    # Save predictions to disk
-    save_predictions(all_predictions, output_dir, model_name)
+    print(f"Saved {len(all_predictions)} predictions to: {pred_dir}")
 
     return all_predictions
 
