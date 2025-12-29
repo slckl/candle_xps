@@ -52,7 +52,8 @@ print(f"Model optimization time: {optimize_time:.4f} seconds")
 
 # url = "https://media.roboflow.com/notebooks/examples/dog-2.jpeg"
 # image = Image.open(io.BytesIO(requests.get(url).content))
-image = Image.open("sample.jpg")
+image_path = "sample.jpg"
+image = Image.open(image_path)
 warmup = 10
 iters = 10
 start_time = None
@@ -84,6 +85,7 @@ annotated_image = sv.BoxAnnotator().annotate(annotated_image, detections)
 annotated_image = sv.LabelAnnotator().annotate(annotated_image, detections, labels)
 
 # save image to output.jpg
-annotated_image.save("sample.py.jpg")
+output_path = image_path.rsplit(".", 1)[0] + ".py.jpg"
+annotated_image.save(output_path)
 
 # sv.plot_image(annotated_image)

@@ -345,6 +345,6 @@ if __name__ == "__main__":
     annotated_image = sv.LabelAnnotator().annotate(annotated_image, detections, labels)
 
     # save image to output.jpg
-    output_path = "sample.py.jpg"
+    output_path = args.image.rsplit(".", 1)[0] + ".py.jpg"
     annotated_image.save(output_path)
     print(f"Annotated image saved to: {output_path}")
