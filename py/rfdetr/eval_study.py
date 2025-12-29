@@ -130,6 +130,14 @@ class Args:
         self.num_workers = kwargs.get("num_workers", 4)
         self.fp16_eval = kwargs.get("fp16_eval", False)
 
+        # Dataset transform settings
+        self.multi_scale = False
+        self.expanded_scales = False
+        self.do_random_resize_via_padding = False
+        self.square_resize_div_64 = True  # Use square resize for proper model input
+        self.patch_size = 16
+        self.num_windows = 4
+
         # Other required args
         self.distributed = False
         self.output_dir = kwargs.get("output_dir", "eval_output")
@@ -194,7 +202,9 @@ def evaluate_model(model, criterion, postprocess, data_loader, base_ds, device, 
         f"\nEvaluation completed in {total_time:.1f}s ({processed / total_time:.1f} img/s)"
     )
 
-    # Accumulate and summarize results
+    # Synchronize and accumulate results
+    print("Accumulating evaluation results...")
+    coco_evaluator.synchronize_between_processes()
     coco_evaluator.accumulate()
     coco_evaluator.summarize()
 
