@@ -9,6 +9,7 @@ target
 py/rfdetr/*.jpg
 py/rfdetr/output
 py/rfdetr/export
+py/rfdetr/eval_output
 *.pth
 *.safetensors
 *.onnx

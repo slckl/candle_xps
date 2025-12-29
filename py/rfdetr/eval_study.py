@@ -4,13 +4,25 @@ RF-DETR COCO Evaluation Script
 This script evaluates RF-DETR models on the COCO validation dataset and reports
 standard object detection metrics (AP, AP50, AP75, etc.).
 
+Features:
+- Saves intermediate predictions to disk for later analysis
+- Can load cached predictions to skip inference
+- Reports standard COCO metrics
+
 Usage:
+    # Run evaluation and save predictions
     uv run eval_study.py -m nano --coco-path /path/to/coco
-    uv run eval_study.py -m small --coco-path /path/to/coco --batch-size 4
+
+    # Load cached predictions and evaluate
+    uv run eval_study.py -m nano --coco-path /path/to/coco --load-predictions
+
+    # Specify custom output directory
+    uv run eval_study.py -m nano --coco-path /path/to/coco -o my_eval_output
 """
 
 import argparse
 import json
+import pickle
 import time
 from pathlib import Path
 
@@ -28,7 +40,7 @@ from rfdetr import (
 from rfdetr.datasets import build_dataset, get_coco_api_from_dataset
 from rfdetr.datasets.coco_eval import CocoEvaluator
 from rfdetr.engine import coco_extended_metrics
-from rfdetr.models import PostProcess, build_criterion_and_postprocessors
+from rfdetr.models import build_criterion_and_postprocessors
 
 MODEL_CLASSES = {
     "nano": RFDETRNano,
@@ -143,23 +155,89 @@ class Args:
         self.output_dir = kwargs.get("output_dir", "eval_output")
 
 
-def evaluate_model(model, criterion, postprocess, data_loader, base_ds, device, args):
+def save_predictions(predictions: dict, output_dir: Path, model_name: str):
     """
-    Evaluate model on COCO dataset.
+    Save predictions to disk for later analysis.
 
-    This is a simplified version of rfdetr.engine.evaluate for standalone use.
+    Args:
+        predictions: Dict mapping image_id to prediction results
+        output_dir: Directory to save predictions
+        model_name: Name of the model (used in filename)
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Save as pickle for exact reproduction
+    pkl_path = output_dir / f"predictions_{model_name}.pkl"
+    with open(pkl_path, "wb") as f:
+        pickle.dump(predictions, f)
+    print(f"Saved predictions to: {pkl_path}")
+
+    # Also save a JSON summary for human inspection
+    json_path = output_dir / f"predictions_{model_name}_summary.json"
+    summary = {
+        "num_images": len(predictions),
+        "image_ids": sorted(predictions.keys()),
+        "sample_predictions": {},
+    }
+
+    # Include a few sample predictions for inspection
+    sample_ids = sorted(predictions.keys())[:5]
+    for img_id in sample_ids:
+        pred = predictions[img_id]
+        summary["sample_predictions"][img_id] = {
+            "num_detections": len(pred["scores"]),
+            "scores": pred["scores"][:10].tolist() if len(pred["scores"]) > 0 else [],
+            "labels": pred["labels"][:10].tolist() if len(pred["labels"]) > 0 else [],
+            "boxes": pred["boxes"][:10].tolist() if len(pred["boxes"]) > 0 else [],
+        }
+
+    with open(json_path, "w") as f:
+        json.dump(summary, f, indent=2)
+    print(f"Saved prediction summary to: {json_path}")
+
+
+def load_predictions(output_dir: Path, model_name: str) -> dict:
+    """
+    Load predictions from disk.
+
+    Args:
+        output_dir: Directory containing saved predictions
+        model_name: Name of the model
+
+    Returns:
+        Dict mapping image_id to prediction results
+    """
+    pkl_path = output_dir / f"predictions_{model_name}.pkl"
+    if not pkl_path.exists():
+        raise FileNotFoundError(
+            f"Predictions file not found: {pkl_path}\n"
+            "Run evaluation without --load-predictions first to generate predictions."
+        )
+
+    print(f"Loading predictions from: {pkl_path}")
+    with open(pkl_path, "rb") as f:
+        predictions = pickle.load(f)
+    print(f"Loaded {len(predictions)} image predictions")
+    return predictions
+
+
+def run_inference(
+    model, postprocess, data_loader, device, args, output_dir: Path, model_name: str
+) -> dict:
+    """
+    Run model inference on the dataset and save predictions.
+
+    Returns:
+        Dict mapping image_id to prediction results
     """
     model.eval()
-    criterion.eval()
 
     if args.fp16_eval:
         model.half()
 
-    iou_types = ("bbox",)
-    coco_evaluator = CocoEvaluator(base_ds, iou_types)
-
+    all_predictions = {}
     num_batches = len(data_loader)
-    print(f"Evaluating on {num_batches} batches...")
+    print(f"Running inference on {num_batches} batches...")
 
     start_time = time.time()
     processed = 0
@@ -182,11 +260,15 @@ def evaluate_model(model, criterion, postprocess, data_loader, base_ds, device, 
         orig_target_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
         results = postprocess(outputs, orig_target_sizes)
 
-        res = {
-            target["image_id"].item(): output
-            for target, output in zip(targets, results)
-        }
-        coco_evaluator.update(res)
+        # Store predictions for each image
+        for target, result in zip(targets, results):
+            img_id = target["image_id"].item()
+            # Convert tensors to CPU numpy for storage
+            all_predictions[img_id] = {
+                "scores": result["scores"].cpu().numpy(),
+                "labels": result["labels"].cpu().numpy(),
+                "boxes": result["boxes"].cpu().numpy(),
+            }
 
         processed += len(targets)
         if (batch_idx + 1) % 100 == 0 or batch_idx == num_batches - 1:
@@ -199,8 +281,43 @@ def evaluate_model(model, criterion, postprocess, data_loader, base_ds, device, 
 
     total_time = time.time() - start_time
     print(
-        f"\nEvaluation completed in {total_time:.1f}s ({processed / total_time:.1f} img/s)"
+        f"\nInference completed in {total_time:.1f}s ({processed / total_time:.1f} img/s)"
     )
+
+    # Save predictions to disk
+    save_predictions(all_predictions, output_dir, model_name)
+
+    return all_predictions
+
+
+def evaluate_predictions(predictions: dict, base_ds, iou_types=("bbox",)) -> dict:
+    """
+    Evaluate predictions using COCO evaluator.
+
+    Args:
+        predictions: Dict mapping image_id to prediction results
+        base_ds: COCO API object for the dataset
+        iou_types: Tuple of IoU types to evaluate
+
+    Returns:
+        Dict containing evaluation statistics
+    """
+    print("\nRunning COCO evaluation...")
+
+    coco_evaluator = CocoEvaluator(base_ds, iou_types)
+
+    # Convert predictions back to tensor format expected by evaluator
+    tensor_predictions = {}
+    for img_id, pred in predictions.items():
+        tensor_predictions[img_id] = {
+            "scores": torch.from_numpy(pred["scores"]),
+            "labels": torch.from_numpy(pred["labels"]),
+            "boxes": torch.from_numpy(pred["boxes"]),
+        }
+
+    # Update evaluator with all predictions
+    print(f"Evaluating {len(tensor_predictions)} images...")
+    coco_evaluator.update(tensor_predictions)
 
     # Synchronize and accumulate results
     print("Accumulating evaluation results...")
@@ -285,7 +402,13 @@ def parse_args():
         "-o",
         type=str,
         default="eval_output",
-        help="Directory to save evaluation results",
+        help="Directory to save evaluation results and predictions",
+    )
+    parser.add_argument(
+        "--load-predictions",
+        "-l",
+        action="store_true",
+        help="Load cached predictions instead of running inference",
     )
     parser.add_argument(
         "--save-results",
@@ -297,16 +420,19 @@ def parse_args():
 
 def main():
     args = parse_args()
+    output_dir = Path(args.output_dir)
 
-    print(f"=" * 60)
-    print(f"RF-DETR COCO Evaluation")
-    print(f"=" * 60)
+    print("=" * 60)
+    print("RF-DETR COCO Evaluation")
+    print("=" * 60)
     print(f"Model: {args.model}")
     print(f"COCO path: {args.coco_path}")
     print(f"Device: {args.device}")
     print(f"Batch size: {args.batch_size}")
     print(f"FP16: {args.fp16}")
-    print(f"=" * 60)
+    print(f"Output dir: {args.output_dir}")
+    print(f"Load predictions: {args.load_predictions}")
+    print("=" * 60)
 
     # Verify COCO path
     coco_path = Path(args.coco_path)
@@ -325,20 +451,6 @@ def main():
             "      *.jpg"
         )
 
-    # Load model
-    print(f"\nLoading {args.model} model...")
-    start_time = time.time()
-    model_cls = MODEL_CLASSES[args.model]
-    rfdetr_model = model_cls()
-    model_load_time = time.time() - start_time
-    print(f"Model loaded in {model_load_time:.2f}s")
-
-    # Get the underlying PyTorch model
-    model = rfdetr_model.model.model
-    model.eval()
-    device = torch.device(args.device)
-    model.to(device)
-
     # Create evaluation args
     eval_args = Args(
         args.model,
@@ -350,13 +462,8 @@ def main():
         output_dir=args.output_dir,
     )
 
-    # Build criterion and postprocessor
-    print("Building criterion and postprocessor...")
-    criterion, postprocess = build_criterion_and_postprocessors(eval_args)
-    criterion.to(device)
-
-    # Build validation dataset
-    print("Loading COCO validation dataset...")
+    # Build validation dataset (needed for COCO API)
+    print("\nLoading COCO validation dataset...")
     dataset_val = build_dataset(
         image_set="val",
         args=eval_args,
@@ -364,25 +471,56 @@ def main():
     )
     print(f"Validation dataset size: {len(dataset_val)} images")
 
-    # Create data loader
-    sampler_val = torch.utils.data.SequentialSampler(dataset_val)
-    data_loader_val = DataLoader(
-        dataset_val,
-        eval_args.batch_size,
-        sampler=sampler_val,
-        drop_last=False,
-        collate_fn=utils.collate_fn,
-        num_workers=eval_args.num_workers,
-    )
-
     # Get COCO API
     base_ds = get_coco_api_from_dataset(dataset_val)
 
-    # Run evaluation
-    print("\nStarting evaluation...")
-    stats, coco_evaluator = evaluate_model(
-        model, criterion, postprocess, data_loader_val, base_ds, device, eval_args
-    )
+    if args.load_predictions:
+        # Load cached predictions
+        predictions = load_predictions(output_dir, args.model)
+    else:
+        # Load model and run inference
+        print(f"\nLoading {args.model} model...")
+        start_time = time.time()
+        model_cls = MODEL_CLASSES[args.model]
+        rfdetr_model = model_cls()
+        model_load_time = time.time() - start_time
+        print(f"Model loaded in {model_load_time:.2f}s")
+
+        # Get the underlying PyTorch model
+        model = rfdetr_model.model.model
+        model.eval()
+        device = torch.device(args.device)
+        model.to(device)
+
+        # Build postprocessor
+        print("Building postprocessor...")
+        _, postprocess = build_criterion_and_postprocessors(eval_args)
+
+        # Create data loader
+        sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+        data_loader_val = DataLoader(
+            dataset_val,
+            eval_args.batch_size,
+            sampler=sampler_val,
+            drop_last=False,
+            collate_fn=utils.collate_fn,
+            num_workers=eval_args.num_workers,
+        )
+
+        # Run inference and save predictions
+        print("\nStarting inference...")
+        predictions = run_inference(
+            model,
+            postprocess,
+            data_loader_val,
+            device,
+            eval_args,
+            output_dir,
+            args.model,
+        )
+
+    # Evaluate predictions
+    stats, coco_evaluator = evaluate_predictions(predictions, base_ds)
 
     # Print results
     print("\n" + "=" * 60)
@@ -408,7 +546,6 @@ def main():
 
     # Save results if requested
     if args.save_results:
-        output_dir = Path(args.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
         results_file = output_dir / f"eval_results_{args.model}.json"
