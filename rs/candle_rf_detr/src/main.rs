@@ -26,7 +26,7 @@ use candle_nn::VarBuilder;
 use clap::{Parser, ValueEnum};
 use image::DynamicImage;
 
-use crate::{config::RfDetrConfig, detection::Detection, model::RfDetr, preprocess::TensorStats};
+use crate::{config::RfDetrConfig, detection::Detection, model::RfDetr};
 
 /// Select the compute device
 pub fn device(cpu: bool) -> Result<Device> {
@@ -133,7 +133,6 @@ impl Args {
 }
 
 /// Color palette for different classes (similar to supervision library's default palette)
-/// These are vibrant, distinguishable colors
 const CLASS_COLORS: [[u8; 3]; 20] = [
     [255, 64, 64],   // red
     [255, 161, 54],  // orange
@@ -268,7 +267,7 @@ fn predict(
     let class_probs = candle_nn::ops::sigmoid(&class_logits)?;
 
     // Get max class and score for each query
-    let (num_queries, num_classes) = (class_probs.dim(1)?, class_probs.dim(2)?);
+    let (num_queries, _num_classes) = (class_probs.dim(1)?, class_probs.dim(2)?);
 
     // Squeeze batch dimension
     let class_probs = class_probs.squeeze(0)?; // [num_queries, num_classes]

@@ -43,14 +43,6 @@ pub struct RfDetr {
 }
 
 impl RfDetr {
-    /// Load an RF-DETR model from weights
-    ///
-    /// # Arguments
-    /// * `vb` - VarBuilder containing the model weights
-    /// * `config` - Model configuration
-    ///
-    /// # Returns
-    /// A loaded RF-DETR model ready for inference
     pub fn load(vb: VarBuilder, config: &RfDetrConfig) -> Result<Self> {
         // Create DINOv2 config from RF-DETR config
         let dino_config = match config.encoder {

@@ -122,8 +122,3 @@ pub fn get_class_name(class_id: usize) -> &'static str {
         "unknown"
     }
 }
-
-/// Get the number of COCO classes (including background)
-pub const fn num_classes() -> usize {
-    COCO_CLASSES.len()
-}

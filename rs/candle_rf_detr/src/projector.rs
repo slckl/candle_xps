@@ -18,7 +18,7 @@
 //! - stages_sampling: List of sampling modules per scale (identity/upsample/downsample)
 //! - stages: C2f -> LayerNorm
 
-use candle_core::{DType, Result, Tensor, D};
+use candle_core::{Result, Tensor, D};
 use candle_nn::{Conv2d, Conv2dConfig, ConvTranspose2d, ConvTranspose2dConfig, Module, VarBuilder};
 
 /// 2D Layer Normalization (channels-last style, applied to NCHW tensors)
@@ -346,9 +346,12 @@ impl ProjectorConfig {
         num_encoder_outputs: usize,
     ) -> Self {
         Self {
-            in_channels: vec![encoder_hidden_size; num_encoder_outputs], // [384, 384, 384, 384]
-            out_channels: hidden_dim,                                    // 256
-            scale_factors: vec![1.0],                                    // P4 only
+            // [384, 384, 384, 384]
+            in_channels: vec![encoder_hidden_size; num_encoder_outputs],
+            // 256
+            out_channels: hidden_dim,
+            // P4 only
+            scale_factors: vec![1.0],
             num_blocks: 3,
         }
     }
@@ -360,9 +363,12 @@ impl ProjectorConfig {
         num_encoder_outputs: usize,
     ) -> Self {
         Self {
-            in_channels: vec![encoder_hidden_size; num_encoder_outputs], // [768, 768, 768, 768]
-            out_channels: hidden_dim,                                    // 384
-            scale_factors: vec![2.0, 0.5],                               // P3 and P5
+            // [768, 768, 768, 768]
+            in_channels: vec![encoder_hidden_size; num_encoder_outputs],
+            // 384
+            out_channels: hidden_dim,
+            // P3 and P5
+            scale_factors: vec![2.0, 0.5],
             num_blocks: 3,
         }
     }
@@ -461,7 +467,7 @@ impl MultiScaleProjector {
 
         let mut results = Vec::new();
 
-        for (stage_idx, ((sampling_modules, c2f), ln)) in self
+        for (_stage_idx, ((sampling_modules, c2f), ln)) in self
             .stages_sampling
             .iter()
             .zip(self.c2f_modules.iter())

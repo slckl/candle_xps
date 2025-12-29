@@ -12,10 +12,6 @@
 //!
 //! Output shape: [batch_size, hidden_dim, height, width]
 
-#[cfg(test)]
-use candle_core::DType;
-#[cfg(test)]
-use candle_core::Device;
 use candle_core::{Result, Tensor};
 
 /// Configuration for sinusoidal position embedding
@@ -251,6 +247,8 @@ pub fn compute_position_encoding(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use candle_core::DType;
+    use candle_core::Device;
 
     #[test]
     fn test_position_encoding_shape() {
