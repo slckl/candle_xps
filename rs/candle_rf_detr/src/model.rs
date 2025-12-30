@@ -273,4 +273,128 @@ impl RfDetr {
 
         Ok((outputs_class, outputs_coord))
     }
+
+    /// Run full inference with debug output for comparing with Python.
+    pub fn forward_debug(&self, pixel_values: &Tensor) -> Result<(Tensor, Tensor)> {
+        // Steps 04: Backbone encoder
+        let encoder_outputs = self.backbone_encoder_forward(pixel_values)?;
+        println!("DEBUG Encoder output:");
+        for (i, out) in encoder_outputs.iter().enumerate() {
+            let flat = out.flatten_all()?.to_vec1::<f32>()?;
+            let mean: f32 = flat.iter().sum::<f32>() / flat.len() as f32;
+            let variance: f32 =
+                flat.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / flat.len() as f32;
+            let std = variance.sqrt();
+            println!(
+                "  [{}] shape: {:?}, mean: {:.4}, std: {:.4}",
+                i,
+                out.dims(),
+                mean,
+                std
+            );
+        }
+
+        // Step 05: Projector
+        let projector_outputs = self.projector_forward(&encoder_outputs)?;
+        println!("DEBUG Projector output:");
+        for (i, out) in projector_outputs.iter().enumerate() {
+            let flat = out.flatten_all()?.to_vec1::<f32>()?;
+            let mean: f32 = flat.iter().sum::<f32>() / flat.len() as f32;
+            let variance: f32 =
+                flat.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / flat.len() as f32;
+            let std = variance.sqrt();
+            println!(
+                "  [{}] shape: {:?}, mean: {:.4}, std: {:.4}",
+                i,
+                out.dims(),
+                mean,
+                std
+            );
+        }
+
+        // Step 06: Position encoding
+        let position_encodings =
+            self.compute_position_encodings(&projector_outputs, pixel_values.device())?;
+
+        // Debug: Print query embeddings
+        let refpoint_flat = self
+            .query_embeddings
+            .refpoint_embed()
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        println!("DEBUG refpoint_embed first query (first 4 values):");
+        println!("  {:?}", &refpoint_flat[..4]);
+
+        let query_feat_flat = self
+            .query_embeddings
+            .query_feat()
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        println!("DEBUG query_feat first query (first 10 values):");
+        println!("  {:?}", &query_feat_flat[..10]);
+
+        // Steps 09-12: Transformer
+        let (decoder_hs, decoder_ref, _encoder_hs, _encoder_ref) =
+            self.transformer_forward(&projector_outputs, &position_encodings)?;
+
+        println!("DEBUG Transformer output:");
+        let hs_flat = decoder_hs.flatten_all()?.to_vec1::<f32>()?;
+        let hs_mean: f32 = hs_flat.iter().sum::<f32>() / hs_flat.len() as f32;
+        println!(
+            "  decoder_hs shape: {:?}, mean: {:.4}",
+            decoder_hs.dims(),
+            hs_mean
+        );
+        let ref_flat = decoder_ref.flatten_all()?.to_vec1::<f32>()?;
+        let ref_mean: f32 = ref_flat.iter().sum::<f32>() / ref_flat.len() as f32;
+        println!(
+            "  decoder_ref shape: {:?}, mean: {:.4}",
+            decoder_ref.dims(),
+            ref_mean
+        );
+
+        // Print first query hidden state for comparison with Python
+        // decoder_hs is [1, 300, 256], get [0, 0, :] = first query of first batch
+        let first_query_hs = decoder_hs
+            .narrow(0, 0, 1)?
+            .narrow(1, 0, 1)?
+            .squeeze(0)?
+            .squeeze(0)?
+            .to_vec1::<f32>()?;
+        println!("DEBUG First query hidden state (first 20 values):");
+        println!("  {:?}", &first_query_hs[..20]);
+
+        // Steps 13-17: Class and bbox predictions
+        // First, let's check the class_embed output for query 0
+        let outputs_class = self.class_embed.forward(&decoder_hs)?;
+        let first_query_logits = outputs_class
+            .narrow(0, 0, 1)?
+            .narrow(1, 0, 1)?
+            .squeeze(0)?
+            .squeeze(0)?
+            .to_vec1::<f32>()?;
+        println!("DEBUG Class logits for query 0 (first 10):");
+        println!("  {:?}", &first_query_logits[..10]);
+
+        let outputs_coord = if self.config.bbox_reparam {
+            let outputs_coord_delta = self.bbox_embed.forward(&decoder_hs)?;
+
+            let ref_xy = decoder_ref.narrow(candle_core::D::Minus1, 0, 2)?;
+            let ref_wh = decoder_ref.narrow(candle_core::D::Minus1, 2, 2)?;
+            let delta_xy = outputs_coord_delta.narrow(candle_core::D::Minus1, 0, 2)?;
+            let delta_wh = outputs_coord_delta.narrow(candle_core::D::Minus1, 2, 2)?;
+
+            let outputs_coord_cxcy = delta_xy.mul(&ref_wh)?.add(&ref_xy)?;
+            let outputs_coord_wh = delta_wh.exp()?.mul(&ref_wh)?;
+            Tensor::cat(
+                &[&outputs_coord_cxcy, &outputs_coord_wh],
+                candle_core::D::Minus1,
+            )?
+        } else {
+            let bbox_delta = self.bbox_embed.forward(&decoder_hs)?;
+            candle_nn::ops::sigmoid(&(bbox_delta + &decoder_ref)?)?
+        };
+
+        Ok((outputs_class, outputs_coord))
+    }
 }

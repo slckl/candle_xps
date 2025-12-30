@@ -40,6 +40,10 @@ pub struct PredictArgs {
     /// The size for the legend, 0 means no legend.
     #[arg(long, default_value_t = 20)]
     pub legend_size: u32,
+
+    /// Enable debug output to compare with Python.
+    #[arg(long)]
+    pub debug: bool,
 }
 
 /// Color palette for different classes (similar to supervision library's default palette)
@@ -226,6 +230,68 @@ pub fn predict_image_raw(
     Ok((raw_pred, h_orig, w_orig))
 }
 
+/// Run inference with debug output - prints raw model outputs for comparison with Python.
+pub fn predict_image_raw_debug(
+    model: &RfDetr,
+    image_path: &str,
+    config: &RfDetrConfig,
+    device: &Device,
+) -> anyhow::Result<(RawPrediction, usize, usize)> {
+    // Steps 01-03: Load, normalize, and resize image
+    let (preprocessed, h_orig, w_orig) =
+        preprocess::preprocess_image(image_path, config.resolution, device)?;
+
+    // Add batch dimension: [3, H, W] -> [1, 3, H, W]
+    let batch_tensor = preprocess::add_batch_dim(&preprocessed)?;
+
+    println!("DEBUG: Input tensor shape: {:?}", batch_tensor.dims());
+
+    // Run full model forward pass with debug output
+    let (class_logits, bbox_predictions) = model.forward_debug(&batch_tensor)?;
+
+    println!("DEBUG: class_logits shape: {:?}", class_logits.dims());
+    println!(
+        "DEBUG: bbox_predictions shape: {:?}",
+        bbox_predictions.dims()
+    );
+
+    // Print raw model output stats
+    let class_probs = candle_nn::ops::sigmoid(&class_logits)?;
+    let class_probs_squeezed = class_probs.squeeze(0)?;
+    let max_scores = class_probs_squeezed.max(1)?;
+    let max_scores_vec: Vec<f32> = max_scores.to_vec1()?;
+
+    let mean_score: f32 = max_scores_vec.iter().sum::<f32>() / max_scores_vec.len() as f32;
+    let max_score = max_scores_vec
+        .iter()
+        .cloned()
+        .fold(f32::NEG_INFINITY, f32::max);
+    let min_score = max_scores_vec.iter().cloned().fold(f32::INFINITY, f32::min);
+
+    println!(
+        "DEBUG: Score stats: mean={:.4}, max={:.4}, min={:.4}",
+        mean_score, max_score, min_score
+    );
+    println!("DEBUG: Top 10 scores: {:?}", &max_scores_vec[..10]);
+
+    // Print top 5 boxes (raw cxcywh normalized)
+    let bbox_squeezed = bbox_predictions.squeeze(0)?;
+    let bbox_vec: Vec<f32> = bbox_squeezed.flatten_all()?.to_vec1()?;
+    println!("DEBUG: Top 5 boxes (cxcywh normalized):");
+    for i in 0..5 {
+        let cx = bbox_vec[i * 4];
+        let cy = bbox_vec[i * 4 + 1];
+        let w = bbox_vec[i * 4 + 2];
+        let h = bbox_vec[i * 4 + 3];
+        println!("  {}: [{:.6}, {:.6}, {:.6}, {:.6}]", i, cx, cy, w, h);
+    }
+
+    // Post-process
+    let raw_pred = postprocess_outputs(&class_logits, &bbox_predictions, h_orig, w_orig)?;
+
+    Ok((raw_pred, h_orig, w_orig))
+}
+
 /// Filter raw predictions by confidence threshold and skip background class.
 pub fn filter_detections(raw: &RawPrediction, confidence_threshold: f32) -> Vec<Detection> {
     let mut detections = Vec::new();
@@ -262,10 +328,15 @@ fn predict_image(
     config: &RfDetrConfig,
     device: &Device,
     confidence_threshold: f32,
+    debug: bool,
 ) -> anyhow::Result<Vec<Detection>> {
     println!("Preprocessing image...");
 
-    let (raw_pred, h_orig, w_orig) = predict_image_raw(model, image_path, config, device)?;
+    let (raw_pred, h_orig, w_orig) = if debug {
+        predict_image_raw_debug(model, image_path, config, device)?
+    } else {
+        predict_image_raw(model, image_path, config, device)?
+    };
 
     println!("  Original image size: {}x{}", w_orig, h_orig);
 
@@ -329,6 +400,7 @@ pub fn run(
         &config,
         device,
         args.confidence_threshold,
+        args.debug,
     )?;
     println!("Inference completed in {:?}", start.elapsed());
 
