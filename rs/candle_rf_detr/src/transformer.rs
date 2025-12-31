@@ -1320,56 +1320,14 @@ impl TransformerDecoder {
                 (ri, qp, qse)
             };
 
-            // Debug output for query 7 sine embedding and query_pos (first layer only)
-            if layer_id == 0 {
-                if let Ok(qse_flat) = query_sine_embed
-                    .narrow(1, 7, 1)?
-                    .squeeze(1)?
-                    .squeeze(0)?
-                    .to_vec1::<f32>()
-                {
-                    println!("DEBUG query_sine_embed[7,:20]: {:?}", &qse_flat[..20]);
-                }
-                if let Ok(qp_flat) = query_pos
-                    .narrow(1, 7, 1)?
-                    .squeeze(1)?
-                    .squeeze(0)?
-                    .to_vec1::<f32>()
-                {
-                    println!("DEBUG query_pos[7,:20]: {:?}", &qp_flat[..20]);
-                }
-                // Also print the refpoints input for query 7
-                if let Ok(ri_flat) = refpoints_input
-                    .narrow(1, 7, 1)?
-                    .squeeze(1)?
-                    .squeeze(0)?
-                    .flatten_all()?
-                    .to_vec1::<f32>()
-                {
-                    println!("DEBUG refpoints_input[7,:]: {:?}", &ri_flat);
-                }
-            }
-
-            // Use debug forward for first layer
-            output = if layer_id == 0 {
-                layer.forward_debug(
-                    &output,
-                    memory,
-                    &query_pos,
-                    &refpoints_input,
-                    spatial_shapes,
-                    level_start_index,
-                )?
-            } else {
-                layer.forward(
-                    &output,
-                    memory,
-                    &query_pos,
-                    &refpoints_input,
-                    spatial_shapes,
-                    level_start_index,
-                )?
-            };
+            output = layer.forward(
+                &output,
+                memory,
+                &query_pos,
+                &refpoints_input,
+                spatial_shapes,
+                level_start_index,
+            )?;
 
             // Iterative refinement (if not using lite mode)
             if !self.lite_refpoint_refine {
