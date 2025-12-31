@@ -15,5 +15,6 @@ py/rfdetr/eval_output
 *.onnx
 /datasets
 rs/eval_output
+eval_output
 
 prompts.md
