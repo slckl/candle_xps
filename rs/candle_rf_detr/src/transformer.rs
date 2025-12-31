@@ -342,6 +342,44 @@ impl MSDeformAttn {
         input_spatial_shapes: &[(usize, usize)],
         input_level_start_index: &[usize],
     ) -> Result<Tensor> {
+        self.forward_inner(
+            query,
+            reference_points,
+            input_flatten,
+            input_spatial_shapes,
+            input_level_start_index,
+            false,
+        )
+    }
+
+    /// Forward pass with debug output
+    pub fn forward_debug(
+        &self,
+        query: &Tensor,
+        reference_points: &Tensor,
+        input_flatten: &Tensor,
+        input_spatial_shapes: &[(usize, usize)],
+        input_level_start_index: &[usize],
+    ) -> Result<Tensor> {
+        self.forward_inner(
+            query,
+            reference_points,
+            input_flatten,
+            input_spatial_shapes,
+            input_level_start_index,
+            true,
+        )
+    }
+
+    fn forward_inner(
+        &self,
+        query: &Tensor,
+        reference_points: &Tensor,
+        input_flatten: &Tensor,
+        input_spatial_shapes: &[(usize, usize)],
+        input_level_start_index: &[usize],
+        debug: bool,
+    ) -> Result<Tensor> {
         let (n, len_q, _) = query.dims3()?;
         let (_, len_in, _) = input_flatten.dims3()?;
 
@@ -363,6 +401,34 @@ impl MSDeformAttn {
         let attention_weights = self.attention_weights.forward(query)?;
         let attention_weights =
             attention_weights.reshape((n, len_q, self.n_heads, self.n_levels * self.n_points))?;
+
+        // Debug output for query 7
+        if debug {
+            if let Ok(so_flat) = sampling_offsets
+                .narrow(1, 7, 1)?
+                .narrow(2, 0, 1)?
+                .narrow(3, 0, 1)?
+                .narrow(4, 0, 1)?
+                .flatten_all()?
+                .to_vec1::<f32>()
+            {
+                println!(
+                    "DEBUG MSDeformAttn sampling_offsets[0,7,0,0,0,:]: {:?}",
+                    &so_flat
+                );
+            }
+            if let Ok(aw_flat) = attention_weights
+                .narrow(1, 7, 1)?
+                .narrow(2, 0, 1)?
+                .flatten_all()?
+                .to_vec1::<f32>()
+            {
+                println!(
+                    "DEBUG MSDeformAttn attention_weights[0,7,0,:4]: {:?}",
+                    &aw_flat[..4.min(aw_flat.len())]
+                );
+            }
+        }
 
         // Compute sampling locations
         let ref_points_last_dim = reference_points.dim(D::Minus1)?;
@@ -415,6 +481,23 @@ impl MSDeformAttn {
             );
         };
 
+        // Debug sampling locations for query 7
+        if debug {
+            if let Ok(sl_flat) = sampling_locations
+                .narrow(1, 7, 1)?
+                .narrow(2, 0, 1)?
+                .narrow(3, 0, 1)?
+                .narrow(4, 0, 1)?
+                .flatten_all()?
+                .to_vec1::<f32>()
+            {
+                println!(
+                    "DEBUG MSDeformAttn sampling_locations[0,7,0,0,0,:]: {:?}",
+                    &sl_flat
+                );
+            }
+        }
+
         // Apply softmax to attention weights
         let attention_weights = candle_nn::ops::softmax_last_dim(&attention_weights)?;
 
@@ -425,13 +508,23 @@ impl MSDeformAttn {
             .reshape((n, self.n_heads, head_dim, len_in))?;
 
         // Core deformable attention computation
-        let output = ms_deform_attn_core(
-            &value,
-            input_spatial_shapes,
-            input_level_start_index,
-            &sampling_locations,
-            &attention_weights,
-        )?;
+        let output = if debug {
+            ms_deform_attn_core_debug(
+                &value,
+                input_spatial_shapes,
+                input_level_start_index,
+                &sampling_locations,
+                &attention_weights,
+            )?
+        } else {
+            ms_deform_attn_core(
+                &value,
+                input_spatial_shapes,
+                input_level_start_index,
+                &sampling_locations,
+                &attention_weights,
+            )?
+        };
 
         // Output projection
         self.output_proj.forward(&output)
@@ -454,6 +547,41 @@ fn ms_deform_attn_core(
     level_start_index: &[usize],
     sampling_locations: &Tensor,
     attention_weights: &Tensor,
+) -> Result<Tensor> {
+    ms_deform_attn_core_inner(
+        value,
+        spatial_shapes,
+        level_start_index,
+        sampling_locations,
+        attention_weights,
+        false,
+    )
+}
+
+fn ms_deform_attn_core_debug(
+    value: &Tensor,
+    spatial_shapes: &[(usize, usize)],
+    level_start_index: &[usize],
+    sampling_locations: &Tensor,
+    attention_weights: &Tensor,
+) -> Result<Tensor> {
+    ms_deform_attn_core_inner(
+        value,
+        spatial_shapes,
+        level_start_index,
+        sampling_locations,
+        attention_weights,
+        true,
+    )
+}
+
+fn ms_deform_attn_core_inner(
+    value: &Tensor,
+    spatial_shapes: &[(usize, usize)],
+    level_start_index: &[usize],
+    sampling_locations: &Tensor,
+    attention_weights: &Tensor,
+    debug: bool,
 ) -> Result<Tensor> {
     let (n, n_heads, head_dim, _) = value.dims4()?;
     let dims = sampling_locations.dims();
@@ -489,6 +617,38 @@ fn ms_deform_attn_core(
         // Bilinear interpolation (grid_sample)
         // Output: [N*n_heads, head_dim, Len_q, n_points]
         let sampling_value_l = grid_sample_bilinear(&value_l, &sampling_grid_l)?;
+
+        // Debug output for query 7
+        if debug && lid == 0 {
+            // sampling_value_l: [N*n_heads, head_dim, Len_q, n_points]
+            // For query 7, head 0: sampling_value_l[0, :, 7, 0]
+            if let Ok(sv_flat) = sampling_value_l
+                .narrow(0, 0, 1)? // head 0
+                .narrow(2, 7, 1)? // query 7
+                .narrow(3, 0, 1)? // point 0
+                .flatten_all()?
+                .to_vec1::<f32>()
+            {
+                println!(
+                    "DEBUG ms_deform_attn sampled_value[head0, :4, query7, point0]: {:?}",
+                    &sv_flat[..4.min(sv_flat.len())]
+                );
+            }
+            // Also print the grid value used for query 7
+            if let Ok(sg_flat) = sampling_grid_l
+                .narrow(0, 0, 1)? // head 0
+                .narrow(1, 7, 1)? // query 7
+                .narrow(2, 0, 1)? // point 0
+                .flatten_all()?
+                .to_vec1::<f32>()
+            {
+                println!(
+                    "DEBUG ms_deform_attn grid[head0, query7, point0, :]: {:?}",
+                    &sg_flat
+                );
+            }
+        }
+
         sampling_value_list.push(sampling_value_l);
     }
 
@@ -615,35 +775,26 @@ fn grid_sample_bilinear(input: &Tensor, grid: &Tensor) -> Result<Tensor> {
     let wd = wd.unsqueeze(1)?.to_dtype(dtype)?;
 
     // Zero out values where coordinates are out of bounds
-    let x_in_bounds_0 = x0.ge(0.0)?.to_dtype(dtype)?;
-    let x_in_bounds_1 = x1.lt(w as f64)?.to_dtype(dtype)?;
-    let y_in_bounds_0 = y0.ge(0.0)?.to_dtype(dtype)?;
-    let y_in_bounds_1 = y1.lt(h as f64)?.to_dtype(dtype)?;
+    // For bilinear interpolation with padding_mode='zeros', we need to check if each
+    // corner (x0,y0), (x1,y0), (x0,y1), (x1,y1) is within bounds [0, W-1] x [0, H-1]
+    // If a corner is out of bounds, its contribution should be zero.
 
-    let mask_a = x_in_bounds_0
-        .mul(&x_in_bounds_1.clone())?
-        .mul(&y_in_bounds_0.clone())?
-        .mul(&y_in_bounds_1.clone())?
-        .unsqueeze(1)?;
-    let mask_b = x0
-        .ge(-1.0)?
-        .to_dtype(dtype)?
-        .mul(&x_in_bounds_1.clone())?
-        .mul(&y_in_bounds_0.clone())?
-        .mul(&y_in_bounds_1.clone())?
-        .unsqueeze(1)?;
-    let mask_c = x_in_bounds_0
-        .mul(&x_in_bounds_1.clone())?
-        .mul(&y0.ge(-1.0)?.to_dtype(dtype)?)?
-        .mul(&y_in_bounds_1.clone())?
-        .unsqueeze(1)?;
-    let mask_d = x0
-        .ge(-1.0)?
-        .to_dtype(dtype)?
-        .mul(&x_in_bounds_1)?
-        .mul(&y0.ge(-1.0)?.to_dtype(dtype)?)?
-        .mul(&y_in_bounds_1)?
-        .unsqueeze(1)?;
+    // Check bounds for each corner separately
+    // Corner A: (x0, y0)
+    let x0_valid = x0.ge(0.0)?.mul(&x0.lt(w as f64)?)?.to_dtype(dtype)?;
+    let y0_valid = y0.ge(0.0)?.mul(&y0.lt(h as f64)?)?.to_dtype(dtype)?;
+    let mask_a = x0_valid.mul(&y0_valid)?.unsqueeze(1)?;
+
+    // Corner B: (x1, y0)
+    let x1_valid = x1.ge(0.0)?.mul(&x1.lt(w as f64)?)?.to_dtype(dtype)?;
+    let mask_b = x1_valid.mul(&y0_valid)?.unsqueeze(1)?;
+
+    // Corner C: (x0, y1)
+    let y1_valid = y1.ge(0.0)?.mul(&y1.lt(h as f64)?)?.to_dtype(dtype)?;
+    let mask_c = x0_valid.mul(&y1_valid)?.unsqueeze(1)?;
+
+    // Corner D: (x1, y1)
+    let mask_d = x1_valid.mul(&y1_valid)?.unsqueeze(1)?;
 
     // Bilinear interpolation with masking
     // Use broadcast_mul since va is [N, C, H_out, W_out] and wa is [N, 1, H_out, W_out]
@@ -827,6 +978,48 @@ impl TransformerDecoderLayer {
         spatial_shapes: &[(usize, usize)],
         level_start_index: &[usize],
     ) -> Result<Tensor> {
+        self.forward_inner(
+            tgt,
+            memory,
+            query_pos,
+            reference_points,
+            spatial_shapes,
+            level_start_index,
+            false,
+        )
+    }
+
+    /// Forward pass with debug output
+    pub fn forward_debug(
+        &self,
+        tgt: &Tensor,
+        memory: &Tensor,
+        query_pos: &Tensor,
+        reference_points: &Tensor,
+        spatial_shapes: &[(usize, usize)],
+        level_start_index: &[usize],
+    ) -> Result<Tensor> {
+        self.forward_inner(
+            tgt,
+            memory,
+            query_pos,
+            reference_points,
+            spatial_shapes,
+            level_start_index,
+            true,
+        )
+    }
+
+    fn forward_inner(
+        &self,
+        tgt: &Tensor,
+        memory: &Tensor,
+        query_pos: &Tensor,
+        reference_points: &Tensor,
+        spatial_shapes: &[(usize, usize)],
+        level_start_index: &[usize],
+        debug: bool,
+    ) -> Result<Tensor> {
         // Self-attention
         let q = (tgt + query_pos)?;
         let k = &q;
@@ -836,18 +1029,89 @@ impl TransformerDecoderLayer {
         let tgt = (tgt + &tgt2)?;
         let tgt = self.norm1.forward(&tgt)?;
 
+        if debug {
+            if let Ok(t) = tgt
+                .narrow(1, 7, 1)?
+                .squeeze(1)?
+                .squeeze(0)?
+                .to_vec1::<f32>()
+            {
+                println!(
+                    "DEBUG DecoderLayer after self_attn+norm1 [7,:10]: {:?}",
+                    &t[..10]
+                );
+            }
+        }
+
         // Cross-attention (deformable)
         let q_with_pos = (&tgt + query_pos)?;
-        let tgt2 = self.cross_attn.forward(
-            &q_with_pos,
-            reference_points,
-            memory,
-            spatial_shapes,
-            level_start_index,
-        )?;
+        let tgt2 = if debug {
+            // Debug: print q_with_pos for query 7
+            if let Ok(qwp_flat) = q_with_pos
+                .narrow(1, 7, 1)?
+                .squeeze(1)?
+                .squeeze(0)?
+                .to_vec1::<f32>()
+            {
+                println!(
+                    "DEBUG DecoderLayer q_with_pos[7,:10]: {:?}",
+                    &qwp_flat[..10]
+                );
+            }
+            if let Ok(rp_flat) = reference_points
+                .narrow(1, 7, 1)?
+                .flatten_all()?
+                .to_vec1::<f32>()
+            {
+                println!("DEBUG DecoderLayer reference_points[7,:]: {:?}", &rp_flat);
+            }
+            self.cross_attn.forward_debug(
+                &q_with_pos,
+                reference_points,
+                memory,
+                spatial_shapes,
+                level_start_index,
+            )?
+        } else {
+            self.cross_attn.forward(
+                &q_with_pos,
+                reference_points,
+                memory,
+                spatial_shapes,
+                level_start_index,
+            )?
+        };
+
+        if debug {
+            if let Ok(t) = tgt2
+                .narrow(1, 7, 1)?
+                .squeeze(1)?
+                .squeeze(0)?
+                .to_vec1::<f32>()
+            {
+                println!(
+                    "DEBUG DecoderLayer cross_attn output [7,:10]: {:?}",
+                    &t[..10]
+                );
+            }
+        }
 
         let tgt = (&tgt + &tgt2)?;
         let tgt = self.norm2.forward(&tgt)?;
+
+        if debug {
+            if let Ok(t) = tgt
+                .narrow(1, 7, 1)?
+                .squeeze(1)?
+                .squeeze(0)?
+                .to_vec1::<f32>()
+            {
+                println!(
+                    "DEBUG DecoderLayer after cross_attn+norm2 [7,:10]: {:?}",
+                    &t[..10]
+                );
+            }
+        }
 
         // FFN
         let tgt2 = self.linear1.forward(&tgt)?;
@@ -856,6 +1120,17 @@ impl TransformerDecoderLayer {
 
         let tgt = (&tgt + &tgt2)?;
         let tgt = self.norm3.forward(&tgt)?;
+
+        if debug {
+            if let Ok(t) = tgt
+                .narrow(1, 7, 1)?
+                .squeeze(1)?
+                .squeeze(0)?
+                .to_vec1::<f32>()
+            {
+                println!("DEBUG DecoderLayer after FFN+norm3 [7,:10]: {:?}", &t[..10]);
+            }
+        }
 
         Ok(tgt)
     }
@@ -936,6 +1211,12 @@ impl TransformerDecoder {
 
     /// Compute query position from reference points
     fn get_reference(&self, refpoints: &Tensor) -> Result<(Tensor, Tensor)> {
+        let (refpoints_input, query_pos, _) = self.get_reference_with_sine(refpoints)?;
+        Ok((refpoints_input, query_pos))
+    }
+
+    /// Compute query position from reference points, also returning sine embedding for debug
+    fn get_reference_with_sine(&self, refpoints: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
         // obj_center: [batch_size, num_queries, 4]
         let obj_center = refpoints.narrow(D::Minus1, 0, 4)?;
 
@@ -949,7 +1230,7 @@ impl TransformerDecoder {
         // query_pos = ref_point_head(query_sine_embed)
         let query_pos = self.ref_point_head.forward(&query_sine_embed)?;
 
-        Ok((refpoints_input, query_pos))
+        Ok((refpoints_input, query_pos, query_sine_embed))
     }
 
     /// Refine reference points using bbox delta
@@ -1009,28 +1290,86 @@ impl TransformerDecoder {
         };
 
         for (layer_id, layer) in self.layers.iter().enumerate() {
-            let (refpoints_input, query_pos) = if self.lite_refpoint_refine {
-                (
-                    fixed_refpoints_input.clone().unwrap(),
-                    fixed_query_pos.clone().unwrap(),
-                )
+            let (refpoints_input, query_pos, query_sine_embed) = if self.lite_refpoint_refine {
+                let ref_for_sine = if self.bbox_reparam {
+                    refpoints.clone()
+                } else {
+                    candle_nn::ops::sigmoid(&refpoints)?
+                };
+                let (ri, qp, qse) = self.get_reference_with_sine(&ref_for_sine)?;
+                if layer_id == 0 {
+                    (
+                        fixed_refpoints_input.clone().unwrap_or(ri.clone()),
+                        fixed_query_pos.clone().unwrap_or(qp.clone()),
+                        qse,
+                    )
+                } else {
+                    (
+                        fixed_refpoints_input.clone().unwrap(),
+                        fixed_query_pos.clone().unwrap(),
+                        qse,
+                    )
+                }
             } else {
                 let ref_for_sine = if self.bbox_reparam {
                     refpoints.clone()
                 } else {
                     candle_nn::ops::sigmoid(&refpoints)?
                 };
-                self.get_reference(&ref_for_sine)?
+                let (ri, qp, qse) = self.get_reference_with_sine(&ref_for_sine)?;
+                (ri, qp, qse)
             };
 
-            output = layer.forward(
-                &output,
-                memory,
-                &query_pos,
-                &refpoints_input,
-                spatial_shapes,
-                level_start_index,
-            )?;
+            // Debug output for query 7 sine embedding and query_pos (first layer only)
+            if layer_id == 0 {
+                if let Ok(qse_flat) = query_sine_embed
+                    .narrow(1, 7, 1)?
+                    .squeeze(1)?
+                    .squeeze(0)?
+                    .to_vec1::<f32>()
+                {
+                    println!("DEBUG query_sine_embed[7,:20]: {:?}", &qse_flat[..20]);
+                }
+                if let Ok(qp_flat) = query_pos
+                    .narrow(1, 7, 1)?
+                    .squeeze(1)?
+                    .squeeze(0)?
+                    .to_vec1::<f32>()
+                {
+                    println!("DEBUG query_pos[7,:20]: {:?}", &qp_flat[..20]);
+                }
+                // Also print the refpoints input for query 7
+                if let Ok(ri_flat) = refpoints_input
+                    .narrow(1, 7, 1)?
+                    .squeeze(1)?
+                    .squeeze(0)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()
+                {
+                    println!("DEBUG refpoints_input[7,:]: {:?}", &ri_flat);
+                }
+            }
+
+            // Use debug forward for first layer
+            output = if layer_id == 0 {
+                layer.forward_debug(
+                    &output,
+                    memory,
+                    &query_pos,
+                    &refpoints_input,
+                    spatial_shapes,
+                    level_start_index,
+                )?
+            } else {
+                layer.forward(
+                    &output,
+                    memory,
+                    &query_pos,
+                    &refpoints_input,
+                    spatial_shapes,
+                    level_start_index,
+                )?
+            };
 
             // Iterative refinement (if not using lite mode)
             if !self.lite_refpoint_refine {
@@ -1274,6 +1613,31 @@ impl Transformer {
                     .flatten_all()?
                     .to_vec1::<u32>()?;
                 println!("DEBUG Two-stage topk_indices (first 10): {:?}", idx_flat);
+
+                // Print scores for first 10 selected proposals
+                let scores_flat = class_scores.flatten_all()?.to_vec1::<f32>()?;
+                println!("DEBUG Two-stage scores for first 10 selected:");
+                for (i, &idx) in idx_flat.iter().enumerate() {
+                    println!(
+                        "  Query {}: proposal_idx={}, score={:.4}",
+                        i, idx, scores_flat[idx as usize]
+                    );
+                }
+
+                // Print encoder coords for first 10 selected
+                let coords_flat: Vec<f32> = enc_outputs_coord.flatten_all()?.to_vec1()?;
+                println!("DEBUG Two-stage encoder coords for first 10 selected:");
+                for (i, &idx) in idx_flat.iter().enumerate() {
+                    let base = (idx as usize) * 4;
+                    println!(
+                        "  Query {}: cx={:.4}, cy={:.4}, w={:.4}, h={:.4}",
+                        i,
+                        coords_flat[base],
+                        coords_flat[base + 1],
+                        coords_flat[base + 2],
+                        coords_flat[base + 3]
+                    );
+                }
             }
 
             // Gather top-k proposals
@@ -1619,6 +1983,51 @@ mod tests {
         assert!(
             (value - 12.5).abs() < 0.01,
             "(0.5, 0.5) sample: expected 12.5, got {}",
+            value
+        );
+    }
+
+    #[test]
+    fn test_grid_sample_bilinear_edge_sampling() {
+        // Test edge case: sampling near the boundary where x1 or y1 would be out of bounds
+        // This is critical for deformable attention when reference points are near image edges
+        let device = Device::Cpu;
+
+        // Create a 24x24 image (similar to feature map size in RF-DETR nano)
+        let h = 24usize;
+        let w = 24usize;
+        let input_data: Vec<f32> = (0..(h * w)).map(|x| x as f32).collect();
+        let input = Tensor::from_vec(input_data, (1, 1, h, w), &device).unwrap();
+
+        // Test sampling at a location near the bottom-right edge
+        // sampling_location = [0.9935, 0.9451] in [0,1] -> grid = [0.987, 0.8902] in [-1,1]
+        // This gives pixel coords x=23.34, y=22.18 for a 24x24 image
+        // x0=23, x1=24 (out of bounds!), y0=22, y1=23
+        // The fix ensures that when x1=24 is out of bounds, we still get valid interpolation
+        // from the in-bounds corners (x0, y0), (x0, y1)
+        let grid = Tensor::from_vec(vec![0.987f32, 0.8902], (1, 1, 1, 2), &device).unwrap();
+        let output = grid_sample_bilinear(&input, &grid).unwrap();
+        let value = output.flatten_all().unwrap().to_vec1::<f32>().unwrap()[0];
+
+        // The result should NOT be zero - it should interpolate from valid pixels
+        // Even though x1=24 is out of bounds, we should get contribution from (x0=23, y0=22) and (x0=23, y1=23)
+        assert!(
+            value.abs() > 0.1,
+            "Edge sampling should not be zero, got {}",
+            value
+        );
+
+        // For x=23.34, y=22.18:
+        // - Corner (23, 22) = pixel 22*24 + 23 = 551, weight = (24-23.34)*(23-22.18) = 0.66*0.82 = 0.54
+        // - Corner (24, 22) = out of bounds, weight = 0
+        // - Corner (23, 23) = pixel 23*24 + 23 = 575, weight = (24-23.34)*(22.18-22) = 0.66*0.18 = 0.12
+        // - Corner (24, 23) = out of bounds, weight = 0
+        // Expected ~= 551 * 0.54 + 575 * 0.12 = 297.54 + 69 = 366.54 (approximately)
+        // But weights don't sum to 1 in this case, so we need to be careful
+        // The important thing is it's non-zero and reasonable
+        assert!(
+            value > 300.0 && value < 600.0,
+            "Edge sampling value should be reasonable, got {}",
             value
         );
     }
