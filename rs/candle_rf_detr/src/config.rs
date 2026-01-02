@@ -104,6 +104,14 @@ pub struct RfDetrConfig {
     // Training-specific (kept for completeness)
     /// Number of groups for group DETR during training
     pub group_detr: usize,
+
+    // Segmentation configuration
+    /// Whether to use segmentation head
+    pub segmentation_head: bool,
+    /// Number of blocks in the segmentation head (typically matches dec_layers)
+    pub seg_num_blocks: usize,
+    /// Downsample ratio for segmentation masks
+    pub seg_downsample_ratio: usize,
 }
 
 impl Default for RfDetrConfig {
@@ -136,6 +144,9 @@ impl RfDetrConfig {
             positional_encoding_size: 24,
             num_classes: 91,
             group_detr: 13,
+            segmentation_head: false,
+            seg_num_blocks: 0,
+            seg_downsample_ratio: 4,
         }
     }
 
@@ -162,6 +173,9 @@ impl RfDetrConfig {
             positional_encoding_size: 32,
             num_classes: 91,
             group_detr: 13,
+            segmentation_head: false,
+            seg_num_blocks: 0,
+            seg_downsample_ratio: 4,
         }
     }
 
@@ -188,6 +202,9 @@ impl RfDetrConfig {
             positional_encoding_size: 36,
             num_classes: 91,
             group_detr: 13,
+            segmentation_head: false,
+            seg_num_blocks: 0,
+            seg_downsample_ratio: 4,
         }
     }
 
@@ -214,6 +231,9 @@ impl RfDetrConfig {
             positional_encoding_size: 37,
             num_classes: 91,
             group_detr: 13,
+            segmentation_head: false,
+            seg_num_blocks: 0,
+            seg_downsample_ratio: 4,
         }
     }
 
@@ -240,6 +260,38 @@ impl RfDetrConfig {
             positional_encoding_size: 37,
             num_classes: 91,
             group_detr: 13,
+            segmentation_head: false,
+            seg_num_blocks: 0,
+            seg_downsample_ratio: 4,
+        }
+    }
+
+    /// Create configuration for RF-DETR Segmentation Preview model
+    pub fn seg() -> Self {
+        Self {
+            encoder: EncoderType::Dinov2WindowedSmall,
+            out_feature_indexes: vec![3, 6, 9, 12],
+            patch_size: 12,
+            num_windows: 2,
+            projector_scale: vec![ProjectorScale::P4],
+            dec_layers: 4,
+            hidden_dim: 256,
+            sa_nheads: 8,
+            ca_nheads: 16,
+            dec_n_points: 2,
+            num_queries: 200,
+            num_select: 200,
+            two_stage: true,
+            bbox_reparam: true,
+            lite_refpoint_refine: true,
+            layer_norm: true,
+            resolution: 432,
+            positional_encoding_size: 36,
+            num_classes: 91,
+            group_detr: 13,
+            segmentation_head: true,
+            seg_num_blocks: 4,
+            seg_downsample_ratio: 4,
         }
     }
 

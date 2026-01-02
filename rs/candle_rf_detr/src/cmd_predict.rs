@@ -1,4 +1,4 @@
-//! Predict subcommand for RF-DETR object detection.
+//! Predict subcommand for RF-DETR object detection and instance segmentation.
 
 use std::path::PathBuf;
 use std::time::Instant;
@@ -6,7 +6,7 @@ use std::time::Instant;
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;
 use clap::Args;
-use image::DynamicImage;
+use image::{DynamicImage, Rgba};
 
 use crate::coco_classes;
 use crate::config::RfDetrConfig;
@@ -16,7 +16,7 @@ use crate::preprocess;
 use crate::Which;
 
 /// Raw prediction output before thresholding.
-/// Contains all 300 queries with their scores, labels, and boxes.
+/// Contains all queries with their scores, labels, and boxes.
 #[derive(Debug, Clone)]
 pub struct RawPrediction {
     /// Confidence scores for each query (max across classes)
@@ -25,6 +25,17 @@ pub struct RawPrediction {
     pub labels: Vec<i64>,
     /// Bounding boxes in [x1, y1, x2, y2] pixel coordinates
     pub boxes: Vec<[f32; 4]>,
+}
+
+/// Detection with optional segmentation mask
+#[derive(Debug, Clone)]
+pub struct DetectionWithMask {
+    /// Base detection info
+    pub detection: Detection,
+    /// Optional binary mask for this detection [H, W] as flattened Vec<bool>
+    pub mask: Option<Vec<bool>>,
+    /// Mask dimensions (height, width)
+    pub mask_dims: Option<(usize, usize)>,
 }
 
 /// Arguments for the predict subcommand
@@ -85,7 +96,7 @@ fn get_darker_color(color: image::Rgb<u8>) -> image::Rgb<u8> {
     ])
 }
 
-/// Draw detections on an image
+/// Draw detections on an image (without masks)
 fn draw_detections(
     img: DynamicImage,
     detections: &[Detection],
@@ -146,6 +157,111 @@ fn draw_detections(
     }
 
     Ok(DynamicImage::ImageRgb8(img))
+}
+
+/// Draw detections with segmentation masks on an image
+fn draw_detections_with_masks(
+    img: DynamicImage,
+    detections: &[DetectionWithMask],
+    legend_size: u32,
+) -> Result<DynamicImage> {
+    let (img_width, img_height) = (img.width() as usize, img.height() as usize);
+    let mut img = img.to_rgba8();
+    let font = Vec::from(include_bytes!("roboto-mono-stripped.ttf") as &[u8]);
+    let font = ab_glyph::FontRef::try_from_slice(&font).map_err(candle_core::Error::wrap)?;
+
+    // First pass: draw all masks with transparency
+    for det_with_mask in detections {
+        let det = &det_with_mask.detection;
+        let box_color = get_class_color(det.class_id);
+
+        // Draw mask if available
+        if let (Some(mask), Some((mask_h, mask_w))) = (&det_with_mask.mask, det_with_mask.mask_dims)
+        {
+            // Create semi-transparent color for mask (alpha = 100 out of 255)
+            let mask_color = Rgba([box_color.0[0], box_color.0[1], box_color.0[2], 100]);
+
+            // The mask is already resized to image dimensions via bilinear interpolation
+            for y in 0..img_height {
+                for x in 0..img_width {
+                    let mask_idx = y * mask_w + x;
+
+                    if mask_idx < mask.len() && mask[mask_idx] {
+                        // Blend the mask color with the existing pixel
+                        let pixel = img.get_pixel(x as u32, y as u32);
+                        let alpha = mask_color.0[3] as f32 / 255.0;
+                        let blended = Rgba([
+                            ((1.0 - alpha) * pixel.0[0] as f32 + alpha * mask_color.0[0] as f32)
+                                as u8,
+                            ((1.0 - alpha) * pixel.0[1] as f32 + alpha * mask_color.0[1] as f32)
+                                as u8,
+                            ((1.0 - alpha) * pixel.0[2] as f32 + alpha * mask_color.0[2] as f32)
+                                as u8,
+                            255,
+                        ]);
+                        img.put_pixel(x as u32, y as u32, blended);
+                    }
+                }
+            }
+        }
+    }
+
+    // Convert to RGB8 for drawing boxes and text
+    let mut img_rgb = DynamicImage::ImageRgba8(img).to_rgb8();
+
+    // Second pass: draw bounding boxes and labels on top
+    for det_with_mask in detections {
+        let det = &det_with_mask.detection;
+        let class_name = coco_classes::get_class_name(det.class_id);
+        let [x1, y1, x2, y2] = det.bbox;
+
+        println!(
+            "{}: ({:.1}, {:.1}, {:.1}, {:.1}) conf: {:.2}",
+            class_name, x1, y1, x2, y2, det.score
+        );
+
+        let x1 = x1 as i32;
+        let y1 = y1 as i32;
+        let dx = (x2 - det.bbox[0]).max(0.0) as u32;
+        let dy = (y2 - det.bbox[1]).max(0.0) as u32;
+
+        // Get color based on class
+        let box_color = get_class_color(det.class_id);
+        let label_bg_color = get_darker_color(box_color);
+
+        // Draw bounding box
+        if dx > 0 && dy > 0 {
+            imageproc::drawing::draw_hollow_rect_mut(
+                &mut img_rgb,
+                imageproc::rect::Rect::at(x1, y1).of_size(dx, dy),
+                box_color,
+            );
+        }
+
+        // Draw label
+        if legend_size > 0 {
+            imageproc::drawing::draw_filled_rect_mut(
+                &mut img_rgb,
+                imageproc::rect::Rect::at(x1, y1).of_size(dx, legend_size),
+                label_bg_color,
+            );
+            let legend = format!("{} {:.0}%", class_name, 100.0 * det.score);
+            imageproc::drawing::draw_text_mut(
+                &mut img_rgb,
+                image::Rgb([255, 255, 255]),
+                x1,
+                y1,
+                ab_glyph::PxScale {
+                    x: legend_size as f32 - 1.0,
+                    y: legend_size as f32 - 1.0,
+                },
+                &font,
+                &legend,
+            );
+        }
+    }
+
+    Ok(DynamicImage::ImageRgb8(img_rgb))
 }
 
 /// Post-process model outputs into raw predictions.
@@ -321,6 +437,42 @@ pub fn filter_detections(raw: &RawPrediction, confidence_threshold: f32) -> Vec<
     detections
 }
 
+/// Filter raw predictions with masks by confidence threshold and skip background class.
+/// Returns indices of kept detections for mask extraction.
+fn filter_detections_with_indices(
+    raw: &RawPrediction,
+    confidence_threshold: f32,
+) -> Vec<(usize, Detection)> {
+    let mut detections = Vec::new();
+
+    for i in 0..raw.scores.len() {
+        let score = raw.scores[i];
+        if score < confidence_threshold {
+            continue;
+        }
+
+        let class_id = raw.labels[i] as usize;
+        // Skip background class (class 0 in COCO is typically background)
+        if class_id == 0 {
+            continue;
+        }
+
+        detections.push((
+            i,
+            Detection {
+                bbox: raw.boxes[i],
+                score,
+                class_id,
+            },
+        ));
+    }
+
+    // Sort by score descending
+    detections.sort_by(|a, b| b.1.score.partial_cmp(&a.1.score).unwrap());
+
+    detections
+}
+
 /// Run inference on a single image with filtering.
 fn predict_image(
     model: &RfDetr,
@@ -349,6 +501,75 @@ fn predict_image(
     );
 
     Ok(detections)
+}
+
+/// Run inference on a single image with segmentation masks.
+fn predict_image_with_masks(
+    model: &RfDetr,
+    image_path: &str,
+    config: &RfDetrConfig,
+    device: &Device,
+    confidence_threshold: f32,
+) -> anyhow::Result<Vec<DetectionWithMask>> {
+    println!("Preprocessing image...");
+
+    // Steps 01-03: Load, normalize, and resize image
+    let (preprocessed, h_orig, w_orig) =
+        preprocess::preprocess_image(image_path, config.resolution, device)?;
+
+    // Add batch dimension: [3, H, W] -> [1, 3, H, W]
+    let batch_tensor = preprocess::add_batch_dim(&preprocessed)?;
+
+    println!("  Original image size: {}x{}", w_orig, h_orig);
+
+    // Run full model forward pass with masks
+    let (class_logits, bbox_predictions, mask_logits) = model.forward_with_masks(&batch_tensor)?;
+
+    // Post-process detections
+    let raw_pred = postprocess_outputs(&class_logits, &bbox_predictions, h_orig, w_orig)?;
+
+    // Filter detections and keep track of indices for mask extraction
+    let filtered = filter_detections_with_indices(&raw_pred, confidence_threshold);
+
+    println!(
+        "  Found {} detections above threshold {}",
+        filtered.len(),
+        confidence_threshold
+    );
+
+    // Extract masks for filtered detections
+    // mask_logits shape: [1, num_queries, mask_h, mask_w]
+    let mask_logits = mask_logits.squeeze(0)?; // [num_queries, mask_h, mask_w]
+
+    let mut detections_with_masks = Vec::with_capacity(filtered.len());
+
+    for (query_idx, detection) in filtered {
+        // Extract mask for this query: [mask_h, mask_w]
+        let mask_tensor = mask_logits.get(query_idx)?;
+
+        // Reshape to [1, 1, mask_h, mask_w] for bilinear interpolation
+        let mask_4d = mask_tensor.unsqueeze(0)?.unsqueeze(0)?;
+
+        // Resize mask to original image size using bilinear interpolation
+        // This matches Python's F.interpolate(masks, size=(h, w), mode='bilinear', align_corners=False)
+        let mask_resized = mask_4d.upsample_bilinear2d(h_orig, w_orig, false)?;
+
+        // Squeeze back to [h_orig, w_orig] and convert to binary mask
+        let mask_flat: Vec<f32> = mask_resized.flatten_all()?.to_vec1()?;
+
+        // Convert to binary mask by thresholding on logits > 0.0
+        // This matches Python's: res_i['masks'] = masks_i > 0.0
+        // (threshold on raw logits, not sigmoid)
+        let binary_mask: Vec<bool> = mask_flat.iter().map(|&v| v > 0.0).collect();
+
+        detections_with_masks.push(DetectionWithMask {
+            detection,
+            mask: Some(binary_mask),
+            mask_dims: Some((h_orig, w_orig)),
+        });
+    }
+
+    Ok(detections_with_masks)
 }
 
 /// Load model from path.
@@ -385,6 +606,9 @@ pub fn run(
     println!("  Hidden dim: {}", config.hidden_dim);
     println!("  Decoder layers: {}", config.dec_layers);
     println!("  Num classes: {}", config.num_classes);
+    if config.segmentation_head {
+        println!("  Segmentation: enabled");
+    }
 
     // Load model weights
     println!("Loading model from: {:?}", model_path);
@@ -393,27 +617,51 @@ pub fn run(
     let model = load_model(&model_path, &config, device)?;
     println!("Model loaded successfully in {:?}", start.elapsed());
 
-    let start = Instant::now();
-    let detections = predict_image(
-        &model,
-        &args.image,
-        &config,
-        device,
-        args.confidence_threshold,
-        args.debug,
-    )?;
-    println!("Inference completed in {:?}", start.elapsed());
-
-    if detections.is_empty() {
-        println!("No detections found.");
-        return Ok(());
-    }
-
     // Load original image for annotation
     let img = image::ImageReader::open(&args.image)?.decode()?;
 
-    // Draw detections
-    let annotated = draw_detections(img, &detections, args.legend_size)?;
+    let annotated = if config.segmentation_head {
+        // Run inference with masks for segmentation model
+        let start = Instant::now();
+        let detections = predict_image_with_masks(
+            &model,
+            &args.image,
+            &config,
+            device,
+            args.confidence_threshold,
+        )?;
+        println!("Inference completed in {:?}", start.elapsed());
+
+        if detections.is_empty() {
+            println!("No detections found.");
+            return Ok(());
+        }
+
+        println!("Annotating {} segmentation masks", detections.len());
+
+        // Draw detections with masks
+        draw_detections_with_masks(img, &detections, args.legend_size)?
+    } else {
+        // Run inference without masks for detection-only model
+        let start = Instant::now();
+        let detections = predict_image(
+            &model,
+            &args.image,
+            &config,
+            device,
+            args.confidence_threshold,
+            args.debug,
+        )?;
+        println!("Inference completed in {:?}", start.elapsed());
+
+        if detections.is_empty() {
+            println!("No detections found.");
+            return Ok(());
+        }
+
+        // Draw detections
+        draw_detections(img, &detections, args.legend_size)?
+    };
 
     // Save output
     let mut output_path = PathBuf::from(&args.image);
