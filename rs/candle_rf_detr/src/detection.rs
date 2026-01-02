@@ -13,10 +13,8 @@ pub struct Detection {
     /// Bounding box in [x1, y1, x2, y2] format (top-left and bottom-right corners)
     /// Coordinates are in pixel space of the original image.
     pub bbox: [f32; 4],
-
     /// Confidence score for this detection (0.0 to 1.0)
     pub score: f32,
-
     /// Class ID (0-90 for COCO, where 0 is background)
     pub class_id: usize,
 }

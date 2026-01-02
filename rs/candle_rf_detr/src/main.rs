@@ -97,7 +97,7 @@ pub struct Args {
     #[arg(long, global = true)]
     model: Option<String>,
     /// Which model variant to use.
-    #[arg(long, value_enum, default_value_t = Which::Small, global = true)]
+    #[arg(long, value_enum, default_value_t = Which::Nano, global = true)]
     which: Which,
     #[command(subcommand)]
     command: Command,
