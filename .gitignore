@@ -11,6 +11,7 @@ py/rfdetr/output
 py/rfdetr/export
 py/rfdetr/eval_output
 *.pth
+*.pt
 *.safetensors
 *.onnx
 /datasets
