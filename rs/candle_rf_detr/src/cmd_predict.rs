@@ -317,7 +317,7 @@ pub fn predict_image_raw(
     let batch_tensor = preprocess::add_batch_dim(&preprocessed)?;
 
     // Run full model forward pass
-    let (class_logits, bbox_predictions) = model.forward(&batch_tensor)?;
+    let (class_logits, bbox_predictions, _mask_logits) = model.forward(&batch_tensor)?;
 
     // Post-process
     let raw_pred = postprocess_outputs(&class_logits, &bbox_predictions, h_orig, w_orig)?;
@@ -482,6 +482,7 @@ fn predict_image(
     Ok(detections)
 }
 
+// TODO remove this in favor of a single predict function with/without masks flag
 /// Run inference on a single image with segmentation masks.
 fn predict_image_with_masks(
     model: &RfDetr,
@@ -502,7 +503,11 @@ fn predict_image_with_masks(
     println!("  Original image size: {}x{}", w_orig, h_orig);
 
     // Run full model forward pass with masks
-    let (class_logits, bbox_predictions, mask_logits) = model.forward_with_masks(&batch_tensor)?;
+    let (class_logits, bbox_predictions, mask_logits) = model.forward(&batch_tensor)?;
+
+    let Some(mask_logits) = mask_logits else {
+        anyhow::bail!("Model did not produce segmentation masks")
+    };
 
     // Post-process detections
     let raw_pred = postprocess_outputs(&class_logits, &bbox_predictions, h_orig, w_orig)?;

@@ -199,21 +199,17 @@ impl RfDetr {
         )
     }
 
-    /// Check if model has segmentation head
-    pub fn has_segmentation_head(&self) -> bool {
-        self.segmentation_head.is_some()
-    }
-
     /// Run full inference on an input image
     ///
     /// # Arguments
     /// * `pixel_values` - Preprocessed input tensor [batch_size, 3, height, width]
     ///
     /// # Returns
-    /// Tuple of (class_logits, bbox_predictions) where:
+    /// Tuple of (class_logits, bbox_predictions, mask_logits) where:
     /// - class_logits: [batch_size, num_queries, num_classes]
     /// - bbox_predictions: [batch_size, num_queries, 4] in (cx, cy, w, h) format
-    pub fn forward(&self, pixel_values: &Tensor) -> Result<(Tensor, Tensor)> {
+    /// - mask_logits: optional, [batch_size, num_queries, H', W'] where H' = resolution / downsample_ratio
+    pub fn forward(&self, pixel_values: &Tensor) -> Result<(Tensor, Tensor, Option<Tensor>)> {
         // Dino2 windowed backbone -> multi-scale projector -> position encodings -> transformer -> class + bbox heads
 
         // Backbone -> projector
@@ -254,65 +250,16 @@ impl RfDetr {
         // Classification
         let outputs_class = self.class_embed.forward(&decoder_hs)?;
 
-        Ok((outputs_class, outputs_coord))
-    }
-
-    /// Run full inference with segmentation output
-    ///
-    /// # Arguments
-    /// * `pixel_values` - Preprocessed input tensor [batch_size, 3, height, width]
-    ///
-    /// # Returns
-    /// Tuple of (class_logits, bbox_predictions, mask_logits) where:
-    /// - class_logits: [batch_size, num_queries, num_classes]
-    /// - bbox_predictions: [batch_size, num_queries, 4] in (cx, cy, w, h) format
-    /// - mask_logits: [batch_size, num_queries, H', W'] where H' = resolution / downsample_ratio
-    pub fn forward_with_masks(&self, pixel_values: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
-        let seg_head = self.segmentation_head.as_ref().ok_or_else(|| {
-            candle_core::Error::Msg("Model does not have segmentation head".into())
-        })?;
-
-        // Steps 04-05: Backbone encoder + projector
-        let encoder_outputs = self.backbone_encoder.forward(pixel_values)?;
-        let projector_outputs = self.projector.forward(&encoder_outputs)?;
-
-        // Step 06: Position encoding
-        let position_encodings =
-            self.compute_position_encodings(&projector_outputs, pixel_values.device())?;
-
-        // Steps 09-12: Transformer
-        let (decoder_hs, decoder_ref, _encoder_hs, _encoder_ref) =
-            self.transformer_forward(&projector_outputs, &position_encodings)?;
-
-        // Steps 13-17: Class and bbox predictions
-        // Bbox prediction with reparameterization
-        let outputs_coord = if self.config.bbox_reparam {
-            let outputs_coord_delta = self.bbox_embed.forward(&decoder_hs)?;
-
-            let ref_xy = decoder_ref.narrow(candle_core::D::Minus1, 0, 2)?;
-            let ref_wh = decoder_ref.narrow(candle_core::D::Minus1, 2, 2)?;
-            let delta_xy = outputs_coord_delta.narrow(candle_core::D::Minus1, 0, 2)?;
-            let delta_wh = outputs_coord_delta.narrow(candle_core::D::Minus1, 2, 2)?;
-
-            let outputs_coord_cxcy = delta_xy.mul(&ref_wh)?.add(&ref_xy)?;
-            let outputs_coord_wh = delta_wh.exp()?.mul(&ref_wh)?;
-            Tensor::cat(
-                &[&outputs_coord_cxcy, &outputs_coord_wh],
-                candle_core::D::Minus1,
-            )?
+        // Optional segmentation masks.
+        let mask_logits = if let Some(seg_head) = &self.segmentation_head {
+            // Use the first projector output (srcs[0]) as spatial features
+            let spatial_features = &projector_outputs[0];
+            let (_, _, input_h, input_w) = pixel_values.dims4()?;
+            let mask_logits = seg_head.forward(spatial_features, &decoder_hs, input_h, input_w)?;
+            Some(mask_logits)
         } else {
-            let bbox_delta = self.bbox_embed.forward(&decoder_hs)?;
-            candle_nn::ops::sigmoid(&(bbox_delta + &decoder_ref)?)?
+            None
         };
-
-        // Classification
-        let outputs_class = self.class_embed.forward(&decoder_hs)?;
-
-        // Segmentation masks
-        // Use the first projector output (srcs[0]) as spatial features
-        let spatial_features = &projector_outputs[0];
-        let (_, _, input_h, input_w) = pixel_values.dims4()?;
-        let mask_logits = seg_head.forward(spatial_features, &decoder_hs, input_h, input_w)?;
 
         Ok((outputs_class, outputs_coord, mask_logits))
     }
