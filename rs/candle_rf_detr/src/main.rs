@@ -1,33 +1,26 @@
-//! RF-DETR Object Detection with Candle
-//!
-//! This binary provides inference and evaluation capabilities for RF-DETR models.
+// #[cfg(feature = "mkl")]
+// extern crate intel_mkl_src;
 
-#[cfg(feature = "mkl")]
-extern crate intel_mkl_src;
+// #[cfg(feature = "accelerate")]
+// extern crate accelerate_src;
 
-#[cfg(feature = "accelerate")]
-extern crate accelerate_src;
-
+mod cmd_eval;
+mod cmd_predict;
 mod coco_classes;
 mod coco_eval;
 mod config;
+#[cfg(test)]
+mod debug;
 mod detection;
-mod dino2;
-mod eval;
 mod model;
-mod pos_enc;
-mod predict;
 mod preprocess;
-mod projector;
-mod query_embed;
-mod transformer;
 
 use candle_core::{Device, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::config::RfDetrConfig;
 
-/// Select the compute device
+/// Picks best available compute device, if not cpu.
 pub fn device(cpu: bool) -> Result<Device> {
     if cpu {
         Ok(Device::Cpu)
@@ -86,10 +79,9 @@ impl Which {
 #[derive(Subcommand, Debug)]
 enum Command {
     /// Run object detection on a single image
-    Predict(predict::PredictArgs),
-
+    Predict(cmd_predict::PredictArgs),
     /// Evaluate on COCO validation dataset
-    Eval(eval::EvalArgs),
+    Eval(cmd_eval::EvalArgs),
 }
 
 #[derive(Parser, Debug)]
@@ -98,15 +90,12 @@ pub struct Args {
     /// Run on CPU rather than on GPU.
     #[arg(long, global = true)]
     cpu: bool,
-
     /// Path to model weights, in safetensors format.
     #[arg(long, global = true)]
     model: Option<String>,
-
     /// Which model variant to use.
     #[arg(long, value_enum, default_value_t = Which::Small, global = true)]
     which: Which,
-
     #[command(subcommand)]
     command: Command,
 }
@@ -145,8 +134,8 @@ pub fn main() -> anyhow::Result<()> {
 
     match &args.command {
         Command::Predict(predict_args) => {
-            predict::run(predict_args, args.which, model_path, &device)
+            cmd_predict::run(predict_args, args.which, model_path, &device)
         }
-        Command::Eval(eval_args) => eval::run(eval_args, args.which, model_path, &device),
+        Command::Eval(eval_args) => cmd_eval::run(eval_args, args.which, model_path, &device),
     }
 }

@@ -7,10 +7,10 @@ use std::time::Instant;
 use candle_core::Device;
 use clap::Args;
 
+use crate::cmd_predict::{load_model, predict_image_raw, RawPrediction};
 use crate::coco_eval::{self, CocoEvaluator, ImagePrediction};
 use crate::config::RfDetrConfig;
 use crate::model::RfDetr;
-use crate::predict::{load_model, predict_image_raw, RawPrediction};
 use crate::Which;
 
 /// Arguments for the eval subcommand

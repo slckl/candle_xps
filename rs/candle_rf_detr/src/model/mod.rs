@@ -1,16 +1,22 @@
 //! RF-DETR Model Implementation
 //!
 //! This module provides the main RF-DETR model structure and loading functionality.
+//!
+pub mod dino2;
+pub mod pos_enc;
+pub mod projector;
+pub mod query_embed;
+pub mod transformer;
 
 use candle_core::{Device, Module, Result, Tensor};
 use candle_nn::{linear, Linear, VarBuilder};
 
 use crate::config::RfDetrConfig;
-use crate::dino2::{DinoV2Encoder, Dinov2Config};
-use crate::pos_enc::PositionEmbeddingSine;
-use crate::projector::{MultiScaleProjector, ProjectorConfig};
-use crate::query_embed::QueryEmbeddings;
-use crate::transformer::{Mlp, Transformer};
+use crate::model::dino2::{DinoV2Encoder, Dinov2Config};
+use crate::model::pos_enc::PositionEmbeddingSine;
+use crate::model::projector::{MultiScaleProjector, ProjectorConfig};
+use crate::model::query_embed::QueryEmbeddings;
+use crate::model::transformer::{Mlp, Transformer};
 
 /// RF-DETR Object Detection Model
 ///
@@ -19,25 +25,18 @@ use crate::transformer::{Mlp, Transformer};
 pub struct RfDetr {
     /// Model configuration
     pub config: RfDetrConfig,
-
     /// Backbone encoder (DINOv2)
     backbone_encoder: DinoV2Encoder,
-
     /// Feature projector (multi-scale)
     projector: MultiScaleProjector,
-
     /// Position encoding generator
     position_encoding: PositionEmbeddingSine,
-
     /// Query embeddings (refpoint_embed and query_feat)
     query_embeddings: QueryEmbeddings,
-
     /// Transformer (decoder + two-stage)
     transformer: Transformer,
-
     /// Class embedding head
     class_embed: Linear,
-
     /// Bbox embedding head
     bbox_embed: Mlp,
 }
@@ -175,11 +174,6 @@ impl RfDetr {
     pub fn backbone_forward(&self, pixel_values: &Tensor) -> Result<Vec<Tensor>> {
         let encoder_outputs = self.backbone_encoder_forward(pixel_values)?;
         self.projector_forward(&encoder_outputs)
-    }
-
-    /// Get query embeddings
-    pub fn query_embeddings(&self) -> &QueryEmbeddings {
-        &self.query_embeddings
     }
 
     /// Compute position encodings for feature maps

@@ -181,8 +181,6 @@ impl PositionEmbeddingSine {
     /// For input indices 0, 1, 2, 3, 4, 5, ...
     /// Output is: sin(0), cos(1), sin(2), cos(3), sin(4), cos(5), ...
     fn apply_sin_cos_interleaved(&self, pos: &Tensor) -> Result<Tensor> {
-        let num_pos_feats = self.config.num_pos_feats;
-
         // Get even and odd indexed elements
         // Even indices: 0, 2, 4, ... -> apply sin
         // Odd indices: 1, 3, 5, ... -> apply cos
@@ -217,31 +215,6 @@ impl PositionEmbeddingSine {
 
         Tensor::cat(&gathered.iter().collect::<Vec<_>>(), shape.len() - 1)
     }
-}
-
-/// Compute position encoding for a batch of feature maps
-///
-/// This is a convenience function that creates a PositionEmbeddingSine and computes
-/// the position encoding for the given feature map dimensions.
-///
-/// # Arguments
-/// * `hidden_dim` - Hidden dimension (output will have this many channels)
-/// * `batch_size` - Batch size
-/// * `height` - Height of the feature map
-/// * `width` - Width of the feature map
-/// * `device` - Device to create tensors on
-///
-/// # Returns
-/// Position encoding tensor of shape [batch_size, hidden_dim, height, width]
-pub fn compute_position_encoding(
-    hidden_dim: usize,
-    batch_size: usize,
-    height: usize,
-    width: usize,
-    device: &candle_core::Device,
-) -> Result<Tensor> {
-    let pos_enc = PositionEmbeddingSine::for_rf_detr(hidden_dim);
-    pos_enc.forward(batch_size, height, width, device)
 }
 
 #[cfg(test)]
