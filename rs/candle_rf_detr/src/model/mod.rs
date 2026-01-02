@@ -1,7 +1,3 @@
-//! RF-DETR Model Implementation
-//!
-//! This module provides the main RF-DETR model structure and loading functionality.
-//!
 pub mod dino2;
 pub mod pos_enc;
 pub mod projector;
@@ -20,10 +16,10 @@ use crate::model::query_embed::QueryEmbeddings;
 use crate::model::segmentation_head::{SegmentationHead, SegmentationHeadConfig};
 use crate::model::transformer::{Mlp, Transformer};
 
-/// RF-DETR Object Detection Model
+/// RF-DETR Object Detection/Instance Segmentation Model
 ///
 /// This struct holds the loaded model weights and configuration
-/// for performing object detection inference.
+/// for performing object detection and optional instance segmentation inference.
 pub struct RfDetr {
     /// Model configuration
     pub config: RfDetrConfig,
@@ -104,7 +100,8 @@ impl RfDetr {
 
         // Load transformer
         // Weight path: transformer.*
-        let dim_feedforward = 2048; // Standard for RF-DETR
+        // Dim is same for all RF-DETR pretrained models so far...
+        let dim_feedforward = 2048;
         let transformer = Transformer::load(
             config.hidden_dim,
             config.sa_nheads,
@@ -158,40 +155,6 @@ impl RfDetr {
         })
     }
 
-    /// Run the backbone encoder to get multi-scale feature maps
-    ///
-    /// # Arguments
-    /// * `pixel_values` - Input tensor of shape [batch_size, 3, height, width]
-    ///
-    /// # Returns
-    /// A vector of feature maps at different scales, each with shape [batch_size, encoder_hidden_dim, h, w]
-    pub fn backbone_encoder_forward(&self, pixel_values: &Tensor) -> Result<Vec<Tensor>> {
-        self.backbone_encoder.forward(pixel_values)
-    }
-
-    /// Run the projector to project encoder features to hidden_dim
-    ///
-    /// # Arguments
-    /// * `encoder_outputs` - Vector of feature maps from backbone encoder
-    ///
-    /// # Returns
-    /// A vector of projected feature maps, each with shape [batch_size, hidden_dim, h, w]
-    pub fn projector_forward(&self, encoder_outputs: &[Tensor]) -> Result<Vec<Tensor>> {
-        self.projector.forward(encoder_outputs)
-    }
-
-    /// Run the full backbone (encoder + projector)
-    ///
-    /// # Arguments
-    /// * `pixel_values` - Input tensor of shape [batch_size, 3, height, width]
-    ///
-    /// # Returns
-    /// A vector of projected feature maps, each with shape [batch_size, hidden_dim, h, w]
-    pub fn backbone_forward(&self, pixel_values: &Tensor) -> Result<Vec<Tensor>> {
-        let encoder_outputs = self.backbone_encoder_forward(pixel_values)?;
-        self.projector_forward(&encoder_outputs)
-    }
-
     /// Compute position encodings for feature maps
     ///
     /// # Arguments
@@ -219,18 +182,18 @@ impl RfDetr {
     ///
     /// # Arguments
     /// * `projector_outputs` - Feature maps from projector
-    /// * `position_encodings` - Position encodings
+    /// * `pos_embeds` - Position encodings
     ///
     /// # Returns
     /// (decoder_hs, decoder_ref, encoder_hs, encoder_ref)
     pub fn transformer_forward(
         &self,
         projector_outputs: &[Tensor],
-        position_encodings: &[Tensor],
+        pos_embeds: &[Tensor],
     ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
         self.transformer.forward(
             projector_outputs,
-            position_encodings,
+            pos_embeds,
             self.query_embeddings.refpoint_embed(),
             self.query_embeddings.query_feat(),
         )
@@ -251,8 +214,13 @@ impl RfDetr {
     /// - class_logits: [batch_size, num_queries, num_classes]
     /// - bbox_predictions: [batch_size, num_queries, 4] in (cx, cy, w, h) format
     pub fn forward(&self, pixel_values: &Tensor) -> Result<(Tensor, Tensor)> {
-        // Steps 04-05: Backbone encoder + projector
-        let projector_outputs = self.backbone_forward(pixel_values)?;
+        // Dino2 windowed backbone -> multi-scale projector -> position encodings -> transformer -> class + bbox heads
+
+        // Backbone -> projector
+        // [batch_size, 3, height, width] -> [batch_size, encoder_hidden_dim, h, w]
+        let encoder_outputs = self.backbone_encoder.forward(pixel_values)?;
+        // [batch_size, encoder_hidden_dim, h, w] -> [batch_size, hidden_dim, h, w]
+        let projector_outputs = self.projector.forward(&encoder_outputs)?;
 
         // Step 06: Position encoding
         let position_encodings =
@@ -305,8 +273,8 @@ impl RfDetr {
         })?;
 
         // Steps 04-05: Backbone encoder + projector
-        let encoder_outputs = self.backbone_encoder_forward(pixel_values)?;
-        let projector_outputs = self.projector_forward(&encoder_outputs)?;
+        let encoder_outputs = self.backbone_encoder.forward(pixel_values)?;
+        let projector_outputs = self.projector.forward(&encoder_outputs)?;
 
         // Step 06: Position encoding
         let position_encodings =
@@ -352,7 +320,7 @@ impl RfDetr {
     /// Run full inference with debug output for comparing with Python.
     pub fn forward_debug(&self, pixel_values: &Tensor) -> Result<(Tensor, Tensor)> {
         // Steps 04: Backbone encoder
-        let encoder_outputs = self.backbone_encoder_forward(pixel_values)?;
+        let encoder_outputs = self.backbone_encoder.forward(pixel_values)?;
         println!("DEBUG Encoder output:");
         for (i, out) in encoder_outputs.iter().enumerate() {
             let flat = out.flatten_all()?.to_vec1::<f32>()?;
@@ -370,7 +338,7 @@ impl RfDetr {
         }
 
         // Step 05: Projector
-        let projector_outputs = self.projector_forward(&encoder_outputs)?;
+        let projector_outputs = self.projector.forward(&encoder_outputs)?;
         println!("DEBUG Projector output:");
         for (i, out) in projector_outputs.iter().enumerate() {
             let flat = out.flatten_all()?.to_vec1::<f32>()?;

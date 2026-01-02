@@ -21,11 +21,9 @@ pub struct QueryEmbeddings {
     /// Reference point embeddings: [num_queries, 4]
     /// These represent initial reference points (cx, cy, w, h)
     refpoint_embed: Tensor,
-
     /// Query feature embeddings: [num_queries, hidden_dim]
     /// These represent initial query features for the decoder
     query_feat: Tensor,
-
     /// Number of queries to use during inference
     num_queries: usize,
 }
@@ -86,32 +84,6 @@ impl QueryEmbeddings {
     /// Get number of queries
     pub fn num_queries(&self) -> usize {
         self.num_queries
-    }
-
-    /// Get reference point embeddings expanded for a batch
-    ///
-    /// # Arguments
-    /// * `batch_size` - Batch size to expand to
-    ///
-    /// # Returns
-    /// Tensor of shape [batch_size, num_queries, 4]
-    pub fn refpoint_embed_batched(&self, batch_size: usize) -> Result<Tensor> {
-        // [num_queries, 4] -> [1, num_queries, 4] -> [batch_size, num_queries, 4]
-        let expanded = self.refpoint_embed.unsqueeze(0)?;
-        expanded.repeat((batch_size, 1, 1))
-    }
-
-    /// Get query feature embeddings expanded for a batch
-    ///
-    /// # Arguments
-    /// * `batch_size` - Batch size to expand to
-    ///
-    /// # Returns
-    /// Tensor of shape [batch_size, num_queries, hidden_dim]
-    pub fn query_feat_batched(&self, batch_size: usize) -> Result<Tensor> {
-        // [num_queries, hidden_dim] -> [1, num_queries, hidden_dim] -> [batch_size, num_queries, hidden_dim]
-        let expanded = self.query_feat.unsqueeze(0)?;
-        expanded.repeat((batch_size, 1, 1))
     }
 }
 
@@ -254,27 +226,5 @@ mod tests {
         } else {
             println!("Reference file not found: {}", ref_path);
         }
-    }
-
-    #[test]
-    fn test_query_embeddings_batched() {
-        // Create dummy tensors for testing
-        let device = Device::Cpu;
-        let refpoint = Tensor::zeros((300, 4), DType::F32, &device).unwrap();
-        let query = Tensor::zeros((300, 256), DType::F32, &device).unwrap();
-
-        let embeddings = QueryEmbeddings {
-            refpoint_embed: refpoint,
-            query_feat: query,
-            num_queries: 300,
-        };
-
-        // Test batched expansion
-        let batch_size = 2;
-        let refpoint_batched = embeddings.refpoint_embed_batched(batch_size).unwrap();
-        let query_batched = embeddings.query_feat_batched(batch_size).unwrap();
-
-        assert_eq!(refpoint_batched.dims(), &[2, 300, 4]);
-        assert_eq!(query_batched.dims(), &[2, 300, 256]);
     }
 }

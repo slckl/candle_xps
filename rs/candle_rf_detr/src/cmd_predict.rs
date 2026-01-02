@@ -11,32 +11,11 @@ use image::{DynamicImage, Rgba};
 use crate::coco_classes;
 use crate::config::RfDetrConfig;
 use crate::detection::Detection;
+use crate::detection::DetectionWithMask;
+use crate::detection::RawPrediction;
 use crate::model::RfDetr;
 use crate::preprocess;
 use crate::Which;
-
-/// Raw prediction output before thresholding.
-/// Contains all queries with their scores, labels, and boxes.
-#[derive(Debug, Clone)]
-pub struct RawPrediction {
-    /// Confidence scores for each query (max across classes)
-    pub scores: Vec<f32>,
-    /// Class labels for each query (argmax across classes)
-    pub labels: Vec<i64>,
-    /// Bounding boxes in [x1, y1, x2, y2] pixel coordinates
-    pub boxes: Vec<[f32; 4]>,
-}
-
-/// Detection with optional segmentation mask
-#[derive(Debug, Clone)]
-pub struct DetectionWithMask {
-    /// Base detection info
-    pub detection: Detection,
-    /// Optional binary mask for this detection [H, W] as flattened Vec<bool>
-    pub mask: Option<Vec<bool>>,
-    /// Mask dimensions (height, width)
-    pub mask_dims: Option<(usize, usize)>,
-}
 
 /// Arguments for the predict subcommand
 #[derive(Args, Debug)]
@@ -573,23 +552,9 @@ fn predict_image_with_masks(
 }
 
 /// Load model from path.
-pub fn load_model(
-    model_path: &PathBuf,
-    config: &RfDetrConfig,
-    device: &Device,
-) -> anyhow::Result<RfDetr> {
-    if !model_path.exists() {
-        anyhow::bail!(
-            "Model weights not found at {:?}. Please provide a valid model path with --model, \
-            or ensure the model file exists.\n\
-            You may need to export the PyTorch model to safetensors format first.",
-            model_path
-        );
-    }
-
+pub fn load_model(model_path: &PathBuf, config: &RfDetrConfig, device: &Device) -> Result<RfDetr> {
     let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[model_path], DType::F32, device)? };
-    let model = RfDetr::load(vb, config)?;
-    Ok(model)
+    RfDetr::load(vb, config)
 }
 
 /// Run the predict subcommand

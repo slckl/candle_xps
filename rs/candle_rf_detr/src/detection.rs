@@ -1,8 +1,17 @@
-//! Detection output structure
-//!
-//! This module defines the Detection struct that represents a single object detection result.
-
 use std::fmt;
+
+// TODO include mask stuff here as well?
+/// Raw prediction output before thresholding.
+/// Contains all queries with their scores, labels, and boxes.
+#[derive(Debug, Clone)]
+pub struct RawPrediction {
+    /// Confidence scores for each query (max across classes)
+    pub scores: Vec<f32>,
+    /// Class labels for each query (argmax across classes)
+    pub labels: Vec<i64>,
+    /// Bounding boxes in [x1, y1, x2, y2] pixel coordinates
+    pub boxes: Vec<[f32; 4]>,
+}
 
 /// A single object detection result.
 ///
@@ -81,6 +90,17 @@ impl fmt::Display for Detection {
             self.class_id, self.score, self.bbox[0], self.bbox[1], self.bbox[2], self.bbox[3]
         )
     }
+}
+
+/// Detection with optional segmentation mask
+#[derive(Debug, Clone)]
+pub struct DetectionWithMask {
+    /// Base detection info
+    pub detection: Detection,
+    /// Optional binary mask for this detection [H, W] as flattened Vec<bool>
+    pub mask: Option<Vec<bool>>,
+    /// Mask dimensions (height, width)
+    pub mask_dims: Option<(usize, usize)>,
 }
 
 #[cfg(test)]
