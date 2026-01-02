@@ -57,6 +57,89 @@ def dump_tensor(tensor: torch.Tensor, path: str, name: str):
     print(f"  Dumped {name}: shape={list(t.shape)}")
 
 
+def predict_with_masks(model, image, threshold=0.5):
+    """
+    Perform prediction with proper mask handling for segmentation models.
+
+    This function fixes a bug in the original rfdetr library where masks
+    are not properly extracted from the tuple output.
+
+    Args:
+        model: The RFDETR model instance
+        image: PIL Image to process
+        threshold: Detection confidence threshold
+
+    Returns:
+        sv.Detections object with detection results (including masks if available)
+    """
+    # Preprocess image
+    img_tensor = F.to_tensor(image)
+    h_orig, w_orig = img_tensor.shape[1:]
+
+    img_tensor = img_tensor.to(model.model.device)
+    img_tensor = F.normalize(img_tensor, model.means, model.stds)
+    img_tensor = F.resize(
+        img_tensor, (model.model.resolution, model.model.resolution), antialias=False
+    )
+
+    batch_tensor = img_tensor.unsqueeze(0)
+
+    with torch.inference_mode():
+        # Use optimized model if available, otherwise use the original model
+        if model._is_optimized_for_inference:
+            raw_predictions = model.model.inference_model(
+                batch_tensor.to(dtype=model._optimized_dtype)
+            )
+        else:
+            model.model.model.eval()
+            raw_predictions = model.model.model(batch_tensor)
+
+        # Handle tuple output from export mode (fixes bug in original library)
+        if isinstance(raw_predictions, tuple):
+            predictions = {
+                "pred_logits": raw_predictions[1],
+                "pred_boxes": raw_predictions[0],
+            }
+            # Check if masks are present (tuple has 3 elements)
+            if len(raw_predictions) == 3:
+                predictions["pred_masks"] = raw_predictions[2]
+        else:
+            predictions = raw_predictions
+
+        target_sizes = torch.tensor([[h_orig, w_orig]], device=model.model.device)
+        results = model.model.postprocess(predictions, target_sizes=target_sizes)
+
+    # Filter by threshold and create detections
+    result = results[0]
+    scores = result["scores"]
+    labels = result["labels"]
+    boxes = result["boxes"]
+
+    keep = scores > threshold
+    scores = scores[keep]
+    labels = labels[keep]
+    boxes = boxes[keep]
+
+    if "masks" in result:
+        masks = result["masks"]
+        masks = masks[keep]
+
+        detections = sv.Detections(
+            xyxy=boxes.float().cpu().numpy(),
+            confidence=scores.float().cpu().numpy(),
+            class_id=labels.cpu().numpy(),
+            mask=masks.squeeze(1).cpu().numpy(),
+        )
+    else:
+        detections = sv.Detections(
+            xyxy=boxes.float().cpu().numpy(),
+            confidence=scores.float().cpu().numpy(),
+            class_id=labels.cpu().numpy(),
+        )
+
+    return detections
+
+
 def predict_with_debug(model, image, threshold=0.5, debug_dir: Optional[str] = None):
     """
     Perform prediction with optional intermediate output dumping.
@@ -77,6 +160,12 @@ def predict_with_debug(model, image, threshold=0.5, debug_dir: Optional[str] = N
     # Get the underlying PyTorch model
     pytorch_model = model.model.model
     pytorch_model.eval()
+
+    # Check if this is a segmentation model
+    has_segmentation_head = (
+        hasattr(pytorch_model, "segmentation_head")
+        and pytorch_model.segmentation_head is not None
+    )
 
     # Step 1: Preprocess image
     img_tensor = F.to_tensor(image)
@@ -182,6 +271,7 @@ def predict_with_debug(model, image, threshold=0.5, debug_dir: Optional[str] = N
         # Step 6: Classification and box prediction heads
         # Note: In export mode, hs has shape [batch_size, num_queries, hidden_dim]
         # (not [num_layers, batch_size, num_queries, hidden_dim] like in training mode)
+        pred_masks = None
         if hs is not None:
             # Bbox prediction with reparameterization
             if pytorch_model.bbox_reparam:
@@ -214,6 +304,15 @@ def predict_with_debug(model, image, threshold=0.5, debug_dir: Optional[str] = N
             if debug_dir:
                 dump_tensor(outputs_class, debug_dir, "15_class_logits")
 
+            # Segmentation masks
+            if has_segmentation_head:
+                pred_masks = pytorch_model.segmentation_head(
+                    srcs[0], [hs], batch_tensor.shape[-2:]
+                )[0]
+
+                if debug_dir:
+                    dump_tensor(pred_masks, debug_dir, "15b_segmentation_masks")
+
             # In export mode, outputs are already [batch_size, num_queries, ...]
             # No need to index with [-1] like in training mode
             pred_logits = outputs_class
@@ -222,6 +321,15 @@ def predict_with_debug(model, image, threshold=0.5, debug_dir: Optional[str] = N
             # Two-stage only mode
             pred_logits = transformer.enc_out_class_embed[0](hs_enc)
             pred_boxes = ref_enc
+
+            # Segmentation masks for two-stage mode
+            if has_segmentation_head:
+                pred_masks = pytorch_model.segmentation_head(
+                    srcs[0], [hs_enc], batch_tensor.shape[-2:], skip_blocks=True
+                )[0]
+
+                if debug_dir:
+                    dump_tensor(pred_masks, debug_dir, "15b_segmentation_masks")
 
         if debug_dir:
             dump_tensor(pred_logits, debug_dir, "16_final_class_logits")
@@ -232,6 +340,8 @@ def predict_with_debug(model, image, threshold=0.5, debug_dir: Optional[str] = N
             "pred_logits": pred_logits,
             "pred_boxes": pred_boxes,
         }
+        if pred_masks is not None:
+            predictions["pred_masks"] = pred_masks
 
         target_sizes = torch.tensor([[h_orig, w_orig]], device=model.model.device)
         results = model.model.postprocess(predictions, target_sizes=target_sizes)
@@ -240,6 +350,10 @@ def predict_with_debug(model, image, threshold=0.5, debug_dir: Optional[str] = N
             dump_tensor(results[0]["scores"], debug_dir, "18_postprocess_scores")
             dump_tensor(results[0]["labels"], debug_dir, "19_postprocess_labels")
             dump_tensor(results[0]["boxes"], debug_dir, "20_postprocess_boxes")
+            if "masks" in results[0]:
+                dump_tensor(
+                    results[0]["masks"].float(), debug_dir, "21_postprocess_masks"
+                )
 
     # Filter by threshold and create detections
     result = results[0]
@@ -252,13 +366,29 @@ def predict_with_debug(model, image, threshold=0.5, debug_dir: Optional[str] = N
     labels = labels[keep]
     boxes = boxes[keep]
 
-    detections = sv.Detections(
-        xyxy=boxes.float().cpu().numpy(),
-        confidence=scores.float().cpu().numpy(),
-        class_id=labels.cpu().numpy(),
-    )
+    if "masks" in result:
+        masks = result["masks"]
+        masks = masks[keep]
+
+        detections = sv.Detections(
+            xyxy=boxes.float().cpu().numpy(),
+            confidence=scores.float().cpu().numpy(),
+            class_id=labels.cpu().numpy(),
+            mask=masks.squeeze(1).cpu().numpy(),
+        )
+    else:
+        detections = sv.Detections(
+            xyxy=boxes.float().cpu().numpy(),
+            confidence=scores.float().cpu().numpy(),
+            class_id=labels.cpu().numpy(),
+        )
 
     return detections
+
+
+def is_segmentation_model(model) -> bool:
+    """Check if the model is a segmentation model."""
+    return isinstance(model, RFDETRSegPreview)
 
 
 def parse_args():
@@ -304,6 +434,11 @@ if __name__ == "__main__":
     model_load_time = time.time() - start_time
     print(f"Model loading time: {model_load_time:.4f} seconds")
 
+    # Check if using segmentation model
+    use_segmentation = is_segmentation_model(model)
+    if use_segmentation:
+        print("Using segmentation model - masks will be annotated")
+
     # Don't optimize for inference when debugging - we need access to intermediate layers
     if args.debug_dir is None:
         start_time = time.time()
@@ -322,6 +457,10 @@ if __name__ == "__main__":
         detections = predict_with_debug(
             model, image, threshold=args.threshold, debug_dir=args.debug_dir
         )
+    elif use_segmentation:
+        # Use custom predict function that properly handles masks
+        # (fixes bug in original library where mask extraction from tuple is broken)
+        detections = predict_with_masks(model, image, threshold=args.threshold)
     else:
         detections = model.predict(image, threshold=args.threshold)
 
@@ -344,6 +483,13 @@ if __name__ == "__main__":
     ]
 
     annotated_image = image.copy()
+
+    # Annotate masks if available (segmentation model)
+    if detections.mask is not None:
+        print(f"Annotating {len(detections)} segmentation masks")
+        annotated_image = sv.MaskAnnotator().annotate(annotated_image, detections)
+
+    # Annotate bounding boxes and labels
     annotated_image = sv.BoxAnnotator().annotate(annotated_image, detections)
     annotated_image = sv.LabelAnnotator().annotate(annotated_image, detections, labels)
 
