@@ -66,11 +66,11 @@ impl Which {
 
     fn default_weights(&self) -> &'static str {
         match self {
-            Which::Nano => "rf-detr-nano.safetensors",
-            Which::Small => "rf-detr-small.safetensors",
-            Which::Medium => "rf-detr-medium.safetensors",
-            Which::Base => "rf-detr-base.safetensors",
-            Which::Large => "rf-detr-large.safetensors",
+            Which::Nano => "rfdetr-nano.safetensors",
+            Which::Small => "rfdetr-small.safetensors",
+            Which::Medium => "rfdetr-medium.safetensors",
+            Which::Base => "rfdetr-base.safetensors",
+            Which::Large => "rfdetr-large.safetensors",
         }
     }
 }
@@ -107,7 +107,7 @@ impl Args {
             None => {
                 // Try to use HuggingFace Hub to download the model
                 let api = hf_hub::api::sync::Api::new()?;
-                let api = api.model("roboflow/rf-detr".to_string());
+                let api = api.model("slckl/candle-rf-detr".to_string());
                 let filename = self.which.default_weights();
                 match api.get(filename) {
                     Ok(path) => path,
