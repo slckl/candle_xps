@@ -149,7 +149,8 @@ fn draw_detections_with_masks(
         let box_color = get_class_color(det.class_id);
 
         // Draw mask if available
-        if let (Some(mask), Some((mask_h, mask_w))) = (&det_with_mask.mask, det_with_mask.mask_dims)
+        if let (Some(mask), Some((_mask_h, mask_w))) =
+            (&det_with_mask.mask, det_with_mask.mask_dims)
         {
             // Create semi-transparent color for mask (alpha = 100 out of 255)
             let mask_color = Rgba([box_color.0[0], box_color.0[1], box_color.0[2], 100]);

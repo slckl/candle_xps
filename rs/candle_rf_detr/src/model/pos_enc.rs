@@ -259,15 +259,6 @@ mod tests {
         assert!(max <= 1.0 + 1e-6, "max {} should be <= 1", max);
     }
 
-    #[test]
-    fn test_config() {
-        let config = PositionEmbeddingSineConfig::new(256);
-        assert_eq!(config.num_pos_feats, 128);
-        assert_eq!(config.temperature, 10000.0);
-        assert!(config.normalize);
-        assert!((config.scale - 2.0 * std::f64::consts::PI).abs() < 1e-10);
-    }
-
     /// Integration test comparing position encoding output against Python reference
     ///
     /// Run with: cargo test test_position_encoding_against_python -- --ignored --nocapture

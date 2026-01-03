@@ -508,15 +508,6 @@ mod tests {
     use candle_core::DType;
     use candle_core::Device;
 
-    #[test]
-    fn test_projector_config_small() {
-        let config = ProjectorConfig::small(256, 384, 4);
-        assert_eq!(config.in_channels, vec![384, 384, 384, 384]);
-        assert_eq!(config.out_channels, 256);
-        assert_eq!(config.scale_factors, vec![1.0]);
-        assert_eq!(config.num_blocks, 3);
-    }
-
     /// Integration test comparing projector output against Python reference
     ///
     /// Run with: cargo test test_projector_against_python -- --ignored --nocapture

@@ -64,6 +64,7 @@ impl RfDetr {
         let backbone_encoder =
             DinoV2Encoder::load(vb.pp("backbone.0.encoder.encoder"), &dino_config)?;
 
+        // TODO use values from config, instead of hardcoded...
         // Load projector
         // Weight path: backbone.0.projector.*
         // Use different config based on scale factors
@@ -178,27 +179,6 @@ impl RfDetr {
         Ok(pos_encodings)
     }
 
-    /// Run transformer forward pass (steps 09-12)
-    ///
-    /// # Arguments
-    /// * `projector_outputs` - Feature maps from projector
-    /// * `pos_embeds` - Position encodings
-    ///
-    /// # Returns
-    /// (decoder_hs, decoder_ref, encoder_hs, encoder_ref)
-    pub fn transformer_forward(
-        &self,
-        projector_outputs: &[Tensor],
-        pos_embeds: &[Tensor],
-    ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
-        self.transformer.forward(
-            projector_outputs,
-            pos_embeds,
-            self.query_embeddings.refpoint_embed(),
-            self.query_embeddings.query_feat(),
-        )
-    }
-
     /// Run full inference on an input image
     ///
     /// # Arguments
@@ -223,8 +203,12 @@ impl RfDetr {
             self.compute_position_encodings(&projector_outputs, pixel_values.device())?;
 
         // Steps 09-12: Transformer
-        let (decoder_hs, decoder_ref, _encoder_hs, _encoder_ref) =
-            self.transformer_forward(&projector_outputs, &position_encodings)?;
+        let (decoder_hs, decoder_ref, _encoder_hs, _encoder_ref) = self.transformer.forward(
+            &projector_outputs,
+            &position_encodings,
+            self.query_embeddings.refpoint_embed(),
+            self.query_embeddings.query_feat(),
+        )?;
 
         // Steps 13-17: Class and bbox predictions
         // Bbox prediction with reparameterization
