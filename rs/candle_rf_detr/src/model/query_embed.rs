@@ -17,15 +17,14 @@ use candle_core::{Result, Tensor};
 use candle_nn::VarBuilder;
 
 /// Query embeddings for RF-DETR transformer decoder
+#[derive(Debug)]
 pub struct QueryEmbeddings {
     /// Reference point embeddings: [num_queries, 4]
     /// These represent initial reference points (cx, cy, w, h)
-    refpoint_embed: Tensor,
+    pub refpoint_embed: Tensor,
     /// Query feature embeddings: [num_queries, hidden_dim]
     /// These represent initial query features for the decoder
-    query_feat: Tensor,
-    /// Number of queries to use during inference
-    num_queries: usize,
+    pub query_feat: Tensor,
 }
 
 impl QueryEmbeddings {
@@ -61,29 +60,7 @@ impl QueryEmbeddings {
         Ok(Self {
             refpoint_embed,
             query_feat,
-            num_queries,
         })
-    }
-
-    /// Get reference point embeddings
-    ///
-    /// # Returns
-    /// Tensor of shape [num_queries, 4] containing (cx, cy, w, h) reference points
-    pub fn refpoint_embed(&self) -> &Tensor {
-        &self.refpoint_embed
-    }
-
-    /// Get query feature embeddings
-    ///
-    /// # Returns
-    /// Tensor of shape [num_queries, hidden_dim] containing query features
-    pub fn query_feat(&self) -> &Tensor {
-        &self.query_feat
-    }
-
-    /// Get number of queries
-    pub fn num_queries(&self) -> usize {
-        self.num_queries
     }
 }
 
@@ -188,11 +165,11 @@ mod tests {
         println!("Query embeddings loaded:");
         println!(
             "  refpoint_embed shape: {:?}",
-            query_embeddings.refpoint_embed().dims()
+            query_embeddings.refpoint_embed.dims()
         );
         println!(
             "  query_feat shape: {:?}",
-            query_embeddings.query_feat().dims()
+            query_embeddings.query_feat.dims()
         );
 
         // Compare refpoint_embed (step 07)
@@ -203,7 +180,7 @@ mod tests {
 
             compare_tensors(
                 "07_refpoint_embed",
-                query_embeddings.refpoint_embed(),
+                &query_embeddings.refpoint_embed,
                 &reference,
                 1e-6, // Should match exactly - just loading weights
             );
@@ -219,7 +196,7 @@ mod tests {
 
             compare_tensors(
                 "08_query_feat",
-                query_embeddings.query_feat(),
+                &query_embeddings.query_feat,
                 &reference,
                 1e-6, // Should match exactly - just loading weights
             );
