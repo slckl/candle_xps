@@ -44,8 +44,6 @@ pub struct DepthwiseConvBlock {
     norm: LayerNorm,
     /// Pointwise convolution implemented as linear
     pwconv1: Linear,
-    /// Dimension for reshaping
-    dim: usize,
 }
 
 impl DepthwiseConvBlock {
@@ -70,7 +68,6 @@ impl DepthwiseConvBlock {
             dwconv,
             norm,
             pwconv1,
-            dim,
         })
     }
 
@@ -79,19 +76,14 @@ impl DepthwiseConvBlock {
 
         // Depthwise conv: (N, C, H, W)
         let x = self.dwconv.forward(x)?;
-
         // Permute: (N, C, H, W) -> (N, H, W, C)
         let x = x.permute((0, 2, 3, 1))?;
-
         // LayerNorm on last dimension
         let x = self.norm.forward(&x)?;
-
         // Pointwise conv (linear)
         let x = self.pwconv1.forward(&x)?;
-
         // GELU activation
         let x = x.gelu_erf()?;
-
         // Permute back: (N, H, W, C) -> (N, C, H, W)
         let x = x.permute((0, 3, 1, 2))?;
 
@@ -138,7 +130,6 @@ impl MLPBlock {
 
 /// Segmentation head that produces per-query mask logits
 pub struct SegmentationHead {
-    /// Configuration
     config: SegmentationHeadConfig,
     /// DepthwiseConvBlocks for spatial feature processing
     blocks: Vec<DepthwiseConvBlock>,
@@ -196,7 +187,7 @@ impl SegmentationHead {
         })
     }
 
-    /// Forward pass for inference (export mode)
+    /// Forward pass for inference
     ///
     /// # Arguments
     /// * `spatial_features` - Feature map from backbone, shape [B, C, H, W]

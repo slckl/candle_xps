@@ -234,8 +234,8 @@ impl Bottleneck {
         // e=1.0 means hidden channels = c2
         let c_ = c2; // hidden channels (e=1.0)
 
-        let cv1 = ConvX::load(vb.pp("cv1"), c1, c_, 3, 1)?;
-        let cv2 = ConvX::load(vb.pp("cv2"), c_, c2, 3, 1)?;
+        let cv1 = ConvX::load_with_activation(vb.pp("cv1"), c1, c_, 3, 1, Activation::Silu)?;
+        let cv2 = ConvX::load_with_activation(vb.pp("cv2"), c_, c2, 3, 1, Activation::Silu)?;
 
         let add = shortcut && c1 == c2;
 
@@ -261,7 +261,8 @@ impl Bottleneck {
 /// - Concatenate all parts: [first_split, second_split, bottleneck_0_out, ..., bottleneck_n-1_out]
 /// - cv2: ConvX that takes (2 + n) * c channels and outputs out_channels
 pub struct C2f {
-    c: usize, // hidden channels
+    // hidden channels
+    c: usize,
     cv1: ConvX,
     cv2: ConvX,
     bottlenecks: Vec<Bottleneck>,
@@ -385,8 +386,6 @@ impl ProjectorConfig {
 /// - stages_sampling[1] (P5): ConvX downsample per feature
 /// - stages contains: C2f -> LayerNorm for each scale
 pub struct MultiScaleProjector {
-    /// Scale factors for each output level
-    scale_factors: Vec<f64>,
     /// Sampling modules for each scale and each input feature
     /// Outer vec: per scale, Inner vec: per input feature
     stages_sampling: Vec<Vec<SamplingModule>>,
@@ -441,7 +440,6 @@ impl MultiScaleProjector {
         }
 
         Ok(Self {
-            scale_factors: config.scale_factors.clone(),
             stages_sampling,
             c2f_modules,
             layer_norms,
