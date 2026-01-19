@@ -25,10 +25,6 @@
 use candle_core::{DType, IndexOp, Result, Tensor, D};
 use candle_nn::{linear, Linear, Module, VarBuilder};
 
-// =============================================================================
-// Helper Functions
-// =============================================================================
-
 /// Multi-Layer Perceptron (MLP / FFN)
 ///
 /// A simple feed-forward network with ReLU activations between layers.
@@ -37,14 +33,6 @@ pub struct Mlp {
 }
 
 impl Mlp {
-    /// Create a new MLP
-    ///
-    /// # Arguments
-    /// * `input_dim` - Input dimension
-    /// * `hidden_dim` - Hidden dimension for intermediate layers
-    /// * `output_dim` - Output dimension
-    /// * `num_layers` - Number of linear layers
-    /// * `vb` - VarBuilder for loading weights
     pub fn load(
         input_dim: usize,
         hidden_dim: usize,
@@ -342,44 +330,6 @@ impl MSDeformAttn {
         input_spatial_shapes: &[(usize, usize)],
         input_level_start_index: &[usize],
     ) -> Result<Tensor> {
-        self.forward_inner(
-            query,
-            reference_points,
-            input_flatten,
-            input_spatial_shapes,
-            input_level_start_index,
-            false,
-        )
-    }
-
-    /// Forward pass with debug output
-    pub fn forward_debug(
-        &self,
-        query: &Tensor,
-        reference_points: &Tensor,
-        input_flatten: &Tensor,
-        input_spatial_shapes: &[(usize, usize)],
-        input_level_start_index: &[usize],
-    ) -> Result<Tensor> {
-        self.forward_inner(
-            query,
-            reference_points,
-            input_flatten,
-            input_spatial_shapes,
-            input_level_start_index,
-            true,
-        )
-    }
-
-    fn forward_inner(
-        &self,
-        query: &Tensor,
-        reference_points: &Tensor,
-        input_flatten: &Tensor,
-        input_spatial_shapes: &[(usize, usize)],
-        input_level_start_index: &[usize],
-        debug: bool,
-    ) -> Result<Tensor> {
         let (n, len_q, _) = query.dims3()?;
         let (_, len_in, _) = input_flatten.dims3()?;
 
@@ -401,34 +351,6 @@ impl MSDeformAttn {
         let attention_weights = self.attention_weights.forward(query)?;
         let attention_weights =
             attention_weights.reshape((n, len_q, self.n_heads, self.n_levels * self.n_points))?;
-
-        // Debug output for query 7
-        if debug {
-            if let Ok(so_flat) = sampling_offsets
-                .narrow(1, 7, 1)?
-                .narrow(2, 0, 1)?
-                .narrow(3, 0, 1)?
-                .narrow(4, 0, 1)?
-                .flatten_all()?
-                .to_vec1::<f32>()
-            {
-                println!(
-                    "DEBUG MSDeformAttn sampling_offsets[0,7,0,0,0,:]: {:?}",
-                    &so_flat
-                );
-            }
-            if let Ok(aw_flat) = attention_weights
-                .narrow(1, 7, 1)?
-                .narrow(2, 0, 1)?
-                .flatten_all()?
-                .to_vec1::<f32>()
-            {
-                println!(
-                    "DEBUG MSDeformAttn attention_weights[0,7,0,:4]: {:?}",
-                    &aw_flat[..4.min(aw_flat.len())]
-                );
-            }
-        }
 
         // Compute sampling locations
         let ref_points_last_dim = reference_points.dim(D::Minus1)?;
@@ -481,23 +403,6 @@ impl MSDeformAttn {
             );
         };
 
-        // Debug sampling locations for query 7
-        if debug {
-            if let Ok(sl_flat) = sampling_locations
-                .narrow(1, 7, 1)?
-                .narrow(2, 0, 1)?
-                .narrow(3, 0, 1)?
-                .narrow(4, 0, 1)?
-                .flatten_all()?
-                .to_vec1::<f32>()
-            {
-                println!(
-                    "DEBUG MSDeformAttn sampling_locations[0,7,0,0,0,:]: {:?}",
-                    &sl_flat
-                );
-            }
-        }
-
         // Apply softmax to attention weights
         let attention_weights = candle_nn::ops::softmax_last_dim(&attention_weights)?;
 
@@ -508,23 +413,13 @@ impl MSDeformAttn {
             .reshape((n, self.n_heads, head_dim, len_in))?;
 
         // Core deformable attention computation
-        let output = if debug {
-            ms_deform_attn_core_debug(
-                &value,
-                input_spatial_shapes,
-                input_level_start_index,
-                &sampling_locations,
-                &attention_weights,
-            )?
-        } else {
-            ms_deform_attn_core(
-                &value,
-                input_spatial_shapes,
-                input_level_start_index,
-                &sampling_locations,
-                &attention_weights,
-            )?
-        };
+        let output = ms_deform_attn_core(
+            &value,
+            input_spatial_shapes,
+            input_level_start_index,
+            &sampling_locations,
+            &attention_weights,
+        )?;
 
         // Output projection
         self.output_proj.forward(&output)
@@ -547,41 +442,6 @@ fn ms_deform_attn_core(
     level_start_index: &[usize],
     sampling_locations: &Tensor,
     attention_weights: &Tensor,
-) -> Result<Tensor> {
-    ms_deform_attn_core_inner(
-        value,
-        spatial_shapes,
-        level_start_index,
-        sampling_locations,
-        attention_weights,
-        false,
-    )
-}
-
-fn ms_deform_attn_core_debug(
-    value: &Tensor,
-    spatial_shapes: &[(usize, usize)],
-    level_start_index: &[usize],
-    sampling_locations: &Tensor,
-    attention_weights: &Tensor,
-) -> Result<Tensor> {
-    ms_deform_attn_core_inner(
-        value,
-        spatial_shapes,
-        level_start_index,
-        sampling_locations,
-        attention_weights,
-        true,
-    )
-}
-
-fn ms_deform_attn_core_inner(
-    value: &Tensor,
-    spatial_shapes: &[(usize, usize)],
-    level_start_index: &[usize],
-    sampling_locations: &Tensor,
-    attention_weights: &Tensor,
-    debug: bool,
 ) -> Result<Tensor> {
     let (n, n_heads, head_dim, _) = value.dims4()?;
     let dims = sampling_locations.dims();
@@ -617,37 +477,6 @@ fn ms_deform_attn_core_inner(
         // Bilinear interpolation (grid_sample)
         // Output: [N*n_heads, head_dim, Len_q, n_points]
         let sampling_value_l = grid_sample_bilinear(&value_l, &sampling_grid_l)?;
-
-        // Debug output for query 7
-        if debug && lid == 0 {
-            // sampling_value_l: [N*n_heads, head_dim, Len_q, n_points]
-            // For query 7, head 0: sampling_value_l[0, :, 7, 0]
-            if let Ok(sv_flat) = sampling_value_l
-                .narrow(0, 0, 1)? // head 0
-                .narrow(2, 7, 1)? // query 7
-                .narrow(3, 0, 1)? // point 0
-                .flatten_all()?
-                .to_vec1::<f32>()
-            {
-                println!(
-                    "DEBUG ms_deform_attn sampled_value[head0, :4, query7, point0]: {:?}",
-                    &sv_flat[..4.min(sv_flat.len())]
-                );
-            }
-            // Also print the grid value used for query 7
-            if let Ok(sg_flat) = sampling_grid_l
-                .narrow(0, 0, 1)? // head 0
-                .narrow(1, 7, 1)? // query 7
-                .narrow(2, 0, 1)? // point 0
-                .flatten_all()?
-                .to_vec1::<f32>()
-            {
-                println!(
-                    "DEBUG ms_deform_attn grid[head0, query7, point0, :]: {:?}",
-                    &sg_flat
-                );
-            }
-        }
 
         sampling_value_list.push(sampling_value_l);
     }
@@ -978,48 +807,6 @@ impl TransformerDecoderLayer {
         spatial_shapes: &[(usize, usize)],
         level_start_index: &[usize],
     ) -> Result<Tensor> {
-        self.forward_inner(
-            tgt,
-            memory,
-            query_pos,
-            reference_points,
-            spatial_shapes,
-            level_start_index,
-            false,
-        )
-    }
-
-    /// Forward pass with debug output
-    pub fn forward_debug(
-        &self,
-        tgt: &Tensor,
-        memory: &Tensor,
-        query_pos: &Tensor,
-        reference_points: &Tensor,
-        spatial_shapes: &[(usize, usize)],
-        level_start_index: &[usize],
-    ) -> Result<Tensor> {
-        self.forward_inner(
-            tgt,
-            memory,
-            query_pos,
-            reference_points,
-            spatial_shapes,
-            level_start_index,
-            true,
-        )
-    }
-
-    fn forward_inner(
-        &self,
-        tgt: &Tensor,
-        memory: &Tensor,
-        query_pos: &Tensor,
-        reference_points: &Tensor,
-        spatial_shapes: &[(usize, usize)],
-        level_start_index: &[usize],
-        debug: bool,
-    ) -> Result<Tensor> {
         // Self-attention
         let q = (tgt + query_pos)?;
         let k = &q;
@@ -1029,89 +816,18 @@ impl TransformerDecoderLayer {
         let tgt = (tgt + &tgt2)?;
         let tgt = self.norm1.forward(&tgt)?;
 
-        if debug {
-            if let Ok(t) = tgt
-                .narrow(1, 7, 1)?
-                .squeeze(1)?
-                .squeeze(0)?
-                .to_vec1::<f32>()
-            {
-                println!(
-                    "DEBUG DecoderLayer after self_attn+norm1 [7,:10]: {:?}",
-                    &t[..10]
-                );
-            }
-        }
-
         // Cross-attention (deformable)
         let q_with_pos = (&tgt + query_pos)?;
-        let tgt2 = if debug {
-            // Debug: print q_with_pos for query 7
-            if let Ok(qwp_flat) = q_with_pos
-                .narrow(1, 7, 1)?
-                .squeeze(1)?
-                .squeeze(0)?
-                .to_vec1::<f32>()
-            {
-                println!(
-                    "DEBUG DecoderLayer q_with_pos[7,:10]: {:?}",
-                    &qwp_flat[..10]
-                );
-            }
-            if let Ok(rp_flat) = reference_points
-                .narrow(1, 7, 1)?
-                .flatten_all()?
-                .to_vec1::<f32>()
-            {
-                println!("DEBUG DecoderLayer reference_points[7,:]: {:?}", &rp_flat);
-            }
-            self.cross_attn.forward_debug(
-                &q_with_pos,
-                reference_points,
-                memory,
-                spatial_shapes,
-                level_start_index,
-            )?
-        } else {
-            self.cross_attn.forward(
-                &q_with_pos,
-                reference_points,
-                memory,
-                spatial_shapes,
-                level_start_index,
-            )?
-        };
-
-        if debug {
-            if let Ok(t) = tgt2
-                .narrow(1, 7, 1)?
-                .squeeze(1)?
-                .squeeze(0)?
-                .to_vec1::<f32>()
-            {
-                println!(
-                    "DEBUG DecoderLayer cross_attn output [7,:10]: {:?}",
-                    &t[..10]
-                );
-            }
-        }
+        let tgt2 = self.cross_attn.forward(
+            &q_with_pos,
+            reference_points,
+            memory,
+            spatial_shapes,
+            level_start_index,
+        )?;
 
         let tgt = (&tgt + &tgt2)?;
         let tgt = self.norm2.forward(&tgt)?;
-
-        if debug {
-            if let Ok(t) = tgt
-                .narrow(1, 7, 1)?
-                .squeeze(1)?
-                .squeeze(0)?
-                .to_vec1::<f32>()
-            {
-                println!(
-                    "DEBUG DecoderLayer after cross_attn+norm2 [7,:10]: {:?}",
-                    &t[..10]
-                );
-            }
-        }
 
         // FFN
         let tgt2 = self.linear1.forward(&tgt)?;
@@ -1120,17 +836,6 @@ impl TransformerDecoderLayer {
 
         let tgt = (&tgt + &tgt2)?;
         let tgt = self.norm3.forward(&tgt)?;
-
-        if debug {
-            if let Ok(t) = tgt
-                .narrow(1, 7, 1)?
-                .squeeze(1)?
-                .squeeze(0)?
-                .to_vec1::<f32>()
-            {
-                println!("DEBUG DecoderLayer after FFN+norm3 [7,:10]: {:?}", &t[..10]);
-            }
-        }
 
         Ok(tgt)
     }

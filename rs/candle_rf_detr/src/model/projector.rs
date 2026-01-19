@@ -29,19 +29,13 @@ pub struct LayerNorm2d {
     weight: Tensor,
     bias: Tensor,
     eps: f64,
-    normalized_shape: usize,
 }
 
 impl LayerNorm2d {
-    pub fn load(vb: VarBuilder, normalized_shape: usize, eps: f64) -> Result<Self> {
-        let weight = vb.get(normalized_shape, "weight")?;
-        let bias = vb.get(normalized_shape, "bias")?;
-        Ok(Self {
-            weight,
-            bias,
-            eps,
-            normalized_shape,
-        })
+    pub fn load(vb: VarBuilder, shape: usize, eps: f64) -> Result<Self> {
+        let weight = vb.get(shape, "weight")?;
+        let bias = vb.get(shape, "bias")?;
+        Ok(Self { weight, bias, eps })
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {

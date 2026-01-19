@@ -141,21 +141,9 @@ impl Dinov2Config {
         self.hidden_size / self.num_attention_heads
     }
 
-    /// Get the number of patches for a given image size
-    pub fn num_patches(&self, height: usize, width: usize) -> usize {
-        (height / self.patch_size) * (width / self.patch_size)
-    }
-
     /// Check if a layer index uses windowed attention
     pub fn is_windowed_layer(&self, layer_idx: usize) -> bool {
         self.window_block_indexes.contains(&layer_idx)
-    }
-
-    /// Get the output stage index from stage name (e.g., "stage3" -> 3)
-    pub fn get_stage_index(stage_name: &str) -> Option<usize> {
-        stage_name
-            .strip_prefix("stage")
-            .and_then(|s| s.parse().ok())
     }
 }
 
@@ -767,7 +755,6 @@ mod tests {
         assert_eq!(config.hidden_size, 384);
         assert_eq!(config.num_attention_heads, 6);
         assert_eq!(config.attention_head_size(), 64);
-        assert_eq!(config.num_patches(512, 512), 1024);
 
         // Layers 3, 6, 9 (using 1-indexed stage numbers) should use full attention
         // Layer 12 doesn't exist in a 12-layer model (layers are 0-11)
@@ -793,7 +780,6 @@ mod tests {
         assert_eq!(config.hidden_size, 768);
         assert_eq!(config.num_attention_heads, 12);
         assert_eq!(config.attention_head_size(), 64);
-        assert_eq!(config.num_patches(560, 560), 1600);
     }
 
     /// Integration test comparing backbone encoder output against Python reference
