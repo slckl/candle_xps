@@ -132,9 +132,15 @@ impl ConvX {
         let x = self.conv.forward(&x)?;
         let x = self.bn.forward(&x)?;
         match self.activation {
-            Activation::Silu => candle_nn::ops::silu(&x),
+            Activation::Silu => x.silu(),
             Activation::Relu => x.relu(),
         }
+    }
+}
+
+impl Module for ConvX {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        self.forward(x)
     }
 }
 

@@ -277,22 +277,4 @@ impl SegmentationHead {
         // Reshape: [B, N, H*W] -> [B, N, H, W]
         result.reshape((b, n, h, w))
     }
-
-    /// Get the downsample ratio for computing mask output size
-    pub fn downsample_ratio(&self) -> usize {
-        self.config.downsample_ratio
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_segmentation_head_config() {
-        let config = SegmentationHeadConfig::new(256, 4);
-        assert_eq!(config.in_dim, 256);
-        assert_eq!(config.num_blocks, 4);
-        assert_eq!(config.interaction_dim(), 256);
-    }
 }
