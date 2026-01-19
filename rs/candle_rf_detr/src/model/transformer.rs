@@ -643,9 +643,7 @@ fn grid_sample_bilinear(input: &Tensor, grid: &Tensor) -> Result<Tensor> {
 
 /// Multi-head Self-Attention
 pub struct MultiheadAttention {
-    /// Number of heads
     num_heads: usize,
-    /// Head dimension
     head_dim: usize,
     /// Combined QKV projection
     in_proj_weight: Tensor,
@@ -909,11 +907,6 @@ impl TransformerDecoder {
         })
     }
 
-    /// Set the bbox embed for iterative refinement
-    pub fn set_bbox_embed(&mut self, bbox_embed: Mlp) {
-        self.bbox_embed = Some(bbox_embed);
-    }
-
     /// Compute query position from reference points
     fn get_reference(&self, refpoints: &Tensor) -> Result<(Tensor, Tensor)> {
         let (refpoints_input, query_pos, _) = self.get_reference_with_sine(refpoints)?;
@@ -995,7 +988,7 @@ impl TransformerDecoder {
         };
 
         for (layer_id, layer) in self.layers.iter().enumerate() {
-            let (refpoints_input, query_pos, query_sine_embed) = if self.lite_refpoint_refine {
+            let (refpoints_input, query_pos, _query_sine_embed) = if self.lite_refpoint_refine {
                 let ref_for_sine = if self.bbox_reparam {
                     refpoints.clone()
                 } else {
@@ -1095,7 +1088,6 @@ pub struct Transformer {
     d_model: usize,
     num_queries: usize,
     num_feature_levels: usize,
-    two_stage: bool,
     bbox_reparam: bool,
 }
 
@@ -1116,8 +1108,6 @@ impl Transformer {
         num_classes: usize,
         vb: VarBuilder,
     ) -> Result<Self> {
-        let two_stage = true; // RF-DETR always uses two-stage
-
         // Load decoder
         let decoder = TransformerDecoder::load(
             d_model,
@@ -1147,7 +1137,6 @@ impl Transformer {
             d_model,
             num_queries,
             num_feature_levels,
-            two_stage,
             bbox_reparam,
         })
     }
@@ -1168,28 +1157,6 @@ impl Transformer {
         pos_embeds: &[Tensor],
         refpoint_embed: &Tensor,
         query_feat: &Tensor,
-    ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
-        self.forward_inner(srcs, pos_embeds, refpoint_embed, query_feat, false)
-    }
-
-    /// Forward with optional debug output
-    pub fn forward_debug(
-        &self,
-        srcs: &[Tensor],
-        pos_embeds: &[Tensor],
-        refpoint_embed: &Tensor,
-        query_feat: &Tensor,
-    ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
-        self.forward_inner(srcs, pos_embeds, refpoint_embed, query_feat, true)
-    }
-
-    fn forward_inner(
-        &self,
-        srcs: &[Tensor],
-        pos_embeds: &[Tensor],
-        refpoint_embed: &Tensor,
-        query_feat: &Tensor,
-        debug: bool,
     ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
         let mut src_flatten = Vec::new();
         let mut lvl_pos_embed_flatten = Vec::new();
@@ -1220,183 +1187,86 @@ impl Transformer {
         let bs = memory.dim(0)?;
 
         // Two-stage proposal generation
-        let (hs_enc, ref_enc, tgt, refpoints) = if self.two_stage {
-            // Generate proposals from encoder output
-            let (output_memory, output_proposals) =
-                gen_encoder_output_proposals(&memory, &spatial_shapes, self.bbox_reparam)?;
+        // Generate proposals from encoder output
+        let (output_memory, output_proposals) =
+            gen_encoder_output_proposals(&memory, &spatial_shapes, self.bbox_reparam)?;
 
-            // Project and normalize
-            let output_memory = self.enc_output.forward(&output_memory)?;
-            let output_memory = self.enc_output_norm.forward(&output_memory)?;
+        // Project and normalize
+        let output_memory = self.enc_output.forward(&output_memory)?;
+        let output_memory = self.enc_output_norm.forward(&output_memory)?;
 
-            // Compute class scores and bbox deltas
-            let enc_outputs_class = self.enc_out_class_embed.forward(&output_memory)?;
-            let enc_outputs_coord_delta = self.enc_out_bbox_embed.forward(&output_memory)?;
+        // Compute class scores and bbox deltas
+        let enc_outputs_class = self.enc_out_class_embed.forward(&output_memory)?;
+        let enc_outputs_coord_delta = self.enc_out_bbox_embed.forward(&output_memory)?;
 
-            // Compute coordinates
-            let enc_outputs_coord = if self.bbox_reparam {
-                let delta_xy = enc_outputs_coord_delta.narrow(D::Minus1, 0, 2)?;
-                let delta_wh = enc_outputs_coord_delta.narrow(D::Minus1, 2, 2)?;
-                let prop_xy = output_proposals.narrow(D::Minus1, 0, 2)?;
-                let prop_wh = output_proposals.narrow(D::Minus1, 2, 2)?;
+        // Compute coordinates
+        let enc_outputs_coord = if self.bbox_reparam {
+            let delta_xy = enc_outputs_coord_delta.narrow(D::Minus1, 0, 2)?;
+            let delta_wh = enc_outputs_coord_delta.narrow(D::Minus1, 2, 2)?;
+            let prop_xy = output_proposals.narrow(D::Minus1, 0, 2)?;
+            let prop_wh = output_proposals.narrow(D::Minus1, 2, 2)?;
 
-                let coord_xy = delta_xy.mul(&prop_wh)?.add(&prop_xy)?;
-                let coord_wh = delta_wh.exp()?.mul(&prop_wh)?;
-                Tensor::cat(&[&coord_xy, &coord_wh], D::Minus1)?
-            } else {
-                (self.enc_out_bbox_embed.forward(&output_memory)? + &output_proposals)?
-            };
-
-            // Select top-k proposals
-            let topk = self.num_queries.min(enc_outputs_class.dim(1)?);
-
-            // Get max class score per proposal
-            let class_scores = enc_outputs_class.max(D::Minus1)?;
-
-            if debug {
-                let cs_flat = class_scores.flatten_all()?.to_vec1::<f32>()?;
-                let max_score = cs_flat.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                let min_score = cs_flat.iter().cloned().fold(f32::INFINITY, f32::min);
-                println!(
-                    "DEBUG Two-stage class_scores: shape={:?}, max={:.4}, min={:.4}",
-                    class_scores.dims(),
-                    max_score,
-                    min_score
-                );
-            }
-
-            // Argsort to get top-k indices
-            let (_, topk_indices) = class_scores.sort_last_dim(false)?;
-            let topk_indices = topk_indices.narrow(1, 0, topk)?;
-
-            if debug {
-                let idx_flat = topk_indices
-                    .narrow(0, 0, 1)?
-                    .narrow(1, 0, 10)?
-                    .flatten_all()?
-                    .to_vec1::<u32>()?;
-                println!("DEBUG Two-stage topk_indices (first 10): {:?}", idx_flat);
-
-                // Print scores for first 10 selected proposals
-                let scores_flat = class_scores.flatten_all()?.to_vec1::<f32>()?;
-                println!("DEBUG Two-stage scores for first 10 selected:");
-                for (i, &idx) in idx_flat.iter().enumerate() {
-                    println!(
-                        "  Query {}: proposal_idx={}, score={:.4}",
-                        i, idx, scores_flat[idx as usize]
-                    );
-                }
-
-                // Print encoder coords for first 10 selected
-                let coords_flat: Vec<f32> = enc_outputs_coord.flatten_all()?.to_vec1()?;
-                println!("DEBUG Two-stage encoder coords for first 10 selected:");
-                for (i, &idx) in idx_flat.iter().enumerate() {
-                    let base = (idx as usize) * 4;
-                    println!(
-                        "  Query {}: cx={:.4}, cy={:.4}, w={:.4}, h={:.4}",
-                        i,
-                        coords_flat[base],
-                        coords_flat[base + 1],
-                        coords_flat[base + 2],
-                        coords_flat[base + 3]
-                    );
-                }
-            }
-
-            // Gather top-k proposals
-            let topk_indices_coord = topk_indices
-                .unsqueeze(D::Minus1)?
-                .repeat((1, 1, 4))?
-                .to_dtype(DType::I64)?;
-            let topk_indices_feat = topk_indices
-                .unsqueeze(D::Minus1)?
-                .repeat((1, 1, self.d_model))?
-                .to_dtype(DType::I64)?;
-
-            let ref_enc = enc_outputs_coord.gather(&topk_indices_coord, 1)?;
-            let hs_enc = output_memory.gather(&topk_indices_feat, 1)?;
-
-            if debug {
-                let ref_flat = ref_enc
-                    .narrow(0, 0, 1)?
-                    .narrow(1, 0, 1)?
-                    .flatten_all()?
-                    .to_vec1::<f32>()?;
-                println!("DEBUG Two-stage ref_enc[0,0,:]: {:?}", ref_flat);
-            }
-
-            // Prepare decoder inputs
-            // tgt: expand query_feat for batch
-            let tgt = query_feat.unsqueeze(0)?.repeat((bs, 1, 1))?;
-
-            // refpoint_embed: combine with two-stage proposals
-            let refpoint_embed = refpoint_embed.unsqueeze(0)?.repeat((bs, 1, 1))?;
-
-            // In export mode with lite_refpoint_refine, we use ts proposals directly
-            let ts_len = ref_enc.dim(1)?;
-            let refpoint_ts = refpoint_embed.narrow(1, 0, ts_len)?;
-            let refpoint_rest = refpoint_embed.narrow(1, ts_len, self.num_queries - ts_len)?;
-
-            let refpoints = if self.bbox_reparam {
-                // Combine ts refpoints with learned offsets
-                let ref_xy = refpoint_ts.narrow(D::Minus1, 0, 2)?;
-                let ref_wh = refpoint_ts.narrow(D::Minus1, 2, 2)?;
-                let ts_xy = ref_enc.narrow(D::Minus1, 0, 2)?;
-                let ts_wh = ref_enc.narrow(D::Minus1, 2, 2)?;
-
-                if debug {
-                    let ref_xy_flat = ref_xy
-                        .narrow(0, 0, 1)?
-                        .narrow(1, 0, 1)?
-                        .flatten_all()?
-                        .to_vec1::<f32>()?;
-                    let ref_wh_flat = ref_wh
-                        .narrow(0, 0, 1)?
-                        .narrow(1, 0, 1)?
-                        .flatten_all()?
-                        .to_vec1::<f32>()?;
-                    let ts_xy_flat = ts_xy
-                        .narrow(0, 0, 1)?
-                        .narrow(1, 0, 1)?
-                        .flatten_all()?
-                        .to_vec1::<f32>()?;
-                    let ts_wh_flat = ts_wh
-                        .narrow(0, 0, 1)?
-                        .narrow(1, 0, 1)?
-                        .flatten_all()?
-                        .to_vec1::<f32>()?;
-                    println!(
-                        "DEBUG refpoint combine: ref_xy={:?}, ref_wh={:?}, ts_xy={:?}, ts_wh={:?}",
-                        ref_xy_flat, ref_wh_flat, ts_xy_flat, ts_wh_flat
-                    );
-                }
-
-                let new_xy = ref_xy.mul(&ts_wh)?.add(&ts_xy)?;
-                let new_wh = ref_wh.exp()?.mul(&ts_wh)?;
-                let combined = Tensor::cat(&[&new_xy, &new_wh], D::Minus1)?;
-
-                if debug {
-                    let comb_flat = combined
-                        .narrow(0, 0, 1)?
-                        .narrow(1, 0, 1)?
-                        .flatten_all()?
-                        .to_vec1::<f32>()?;
-                    println!("DEBUG combined refpoints[0,0,:]: {:?}", comb_flat);
-                }
-
-                if self.num_queries > ts_len {
-                    Tensor::cat(&[&combined, &refpoint_rest], 1)?
-                } else {
-                    combined
-                }
-            } else {
-                let zeros = Tensor::zeros_like(&refpoint_embed)?;
-                (&refpoint_embed + &ref_enc.broadcast_add(&zeros)?)?
-            };
-
-            (hs_enc, ref_enc, tgt, refpoints)
+            let coord_xy = delta_xy.mul(&prop_wh)?.add(&prop_xy)?;
+            let coord_wh = delta_wh.exp()?.mul(&prop_wh)?;
+            Tensor::cat(&[&coord_xy, &coord_wh], D::Minus1)?
         } else {
-            candle_core::bail!("Non-two-stage mode not implemented");
+            (self.enc_out_bbox_embed.forward(&output_memory)? + &output_proposals)?
+        };
+
+        // Select top-k proposals
+        let topk = self.num_queries.min(enc_outputs_class.dim(1)?);
+
+        // Get max class score per proposal
+        let class_scores = enc_outputs_class.max(D::Minus1)?;
+
+        // Argsort to get top-k indices
+        let (_, topk_indices) = class_scores.sort_last_dim(false)?;
+        let topk_indices = topk_indices.narrow(1, 0, topk)?;
+
+        // Gather top-k proposals
+        let topk_indices_coord = topk_indices
+            .unsqueeze(D::Minus1)?
+            .repeat((1, 1, 4))?
+            .to_dtype(DType::I64)?;
+        let topk_indices_feat = topk_indices
+            .unsqueeze(D::Minus1)?
+            .repeat((1, 1, self.d_model))?
+            .to_dtype(DType::I64)?;
+
+        let ref_enc = enc_outputs_coord.gather(&topk_indices_coord, 1)?;
+        let hs_enc = output_memory.gather(&topk_indices_feat, 1)?;
+
+        // Prepare decoder inputs
+        // tgt: expand query_feat for batch
+        let tgt = query_feat.unsqueeze(0)?.repeat((bs, 1, 1))?;
+
+        // refpoint_embed: combine with two-stage proposals
+        let refpoint_embed = refpoint_embed.unsqueeze(0)?.repeat((bs, 1, 1))?;
+
+        // In export mode with lite_refpoint_refine, we use ts proposals directly
+        let ts_len = ref_enc.dim(1)?;
+        let refpoint_ts = refpoint_embed.narrow(1, 0, ts_len)?;
+        let refpoint_rest = refpoint_embed.narrow(1, ts_len, self.num_queries - ts_len)?;
+
+        let refpoints = if self.bbox_reparam {
+            // Combine ts refpoints with learned offsets
+            let ref_xy = refpoint_ts.narrow(D::Minus1, 0, 2)?;
+            let ref_wh = refpoint_ts.narrow(D::Minus1, 2, 2)?;
+            let ts_xy = ref_enc.narrow(D::Minus1, 0, 2)?;
+            let ts_wh = ref_enc.narrow(D::Minus1, 2, 2)?;
+
+            let new_xy = ref_xy.mul(&ts_wh)?.add(&ts_xy)?;
+            let new_wh = ref_wh.exp()?.mul(&ts_wh)?;
+            let combined = Tensor::cat(&[&new_xy, &new_wh], D::Minus1)?;
+
+            if self.num_queries > ts_len {
+                Tensor::cat(&[&combined, &refpoint_rest], 1)?
+            } else {
+                combined
+            }
+        } else {
+            let zeros = Tensor::zeros_like(&refpoint_embed)?;
+            (&refpoint_embed + &ref_enc.broadcast_add(&zeros)?)?
         };
 
         // Run decoder
@@ -1419,10 +1289,6 @@ impl Transformer {
         Ok((hs, references, hs_enc, ref_enc_out))
     }
 }
-
-// =============================================================================
-// Tests
-// =============================================================================
 
 #[cfg(test)]
 mod tests {
