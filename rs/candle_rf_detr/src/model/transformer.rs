@@ -1087,7 +1087,6 @@ pub struct Transformer {
     /// Configuration
     d_model: usize,
     num_queries: usize,
-    num_feature_levels: usize,
     bbox_reparam: bool,
 }
 
@@ -1136,7 +1135,6 @@ impl Transformer {
             enc_out_bbox_embed,
             d_model,
             num_queries,
-            num_feature_levels,
             bbox_reparam,
         })
     }
