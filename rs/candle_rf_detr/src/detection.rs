@@ -1,8 +1,15 @@
-//! Detection output structure
-//!
-//! This module defines the Detection struct that represents a single object detection result.
-
-use std::fmt;
+// TODO include mask stuff here as well?
+/// Raw prediction output before thresholding.
+/// Contains all queries with their scores, labels, and boxes.
+#[derive(Debug, Clone)]
+pub struct RawPrediction {
+    /// Confidence scores for each query (max across classes)
+    pub scores: Vec<f32>,
+    /// Class labels for each query (argmax across classes)
+    pub labels: Vec<i64>,
+    /// Bounding boxes in [x1, y1, x2, y2] pixel coordinates
+    pub boxes: Vec<[f32; 4]>,
+}
 
 /// A single object detection result.
 ///
@@ -19,95 +26,13 @@ pub struct Detection {
     pub class_id: usize,
 }
 
-impl Detection {
-    /// Create a new detection result.
-    ///
-    /// # Arguments
-    /// * `bbox` - Bounding box as [x1, y1, x2, y2]
-    /// * `score` - Confidence score
-    /// * `class_id` - Class ID
-    pub fn new(bbox: [f32; 4], score: f32, class_id: usize) -> Self {
-        Self {
-            bbox,
-            score,
-            class_id,
-        }
-    }
-
-    /// Get the width of the bounding box
-    pub fn width(&self) -> f32 {
-        self.bbox[2] - self.bbox[0]
-    }
-
-    /// Get the height of the bounding box
-    pub fn height(&self) -> f32 {
-        self.bbox[3] - self.bbox[1]
-    }
-
-    /// Get the area of the bounding box
-    pub fn area(&self) -> f32 {
-        self.width() * self.height()
-    }
-
-    /// Get the center point of the bounding box
-    pub fn center(&self) -> (f32, f32) {
-        let cx = (self.bbox[0] + self.bbox[2]) / 2.0;
-        let cy = (self.bbox[1] + self.bbox[3]) / 2.0;
-        (cx, cy)
-    }
-
-    /// Convert bounding box from [x1, y1, x2, y2] to [cx, cy, w, h] format
-    pub fn to_cxcywh(&self) -> [f32; 4] {
-        let (cx, cy) = self.center();
-        [cx, cy, self.width(), self.height()]
-    }
-
-    /// Create a detection from [cx, cy, w, h] format bounding box
-    pub fn from_cxcywh(cxcywh: [f32; 4], score: f32, class_id: usize) -> Self {
-        let [cx, cy, w, h] = cxcywh;
-        let x1 = cx - w / 2.0;
-        let y1 = cy - h / 2.0;
-        let x2 = cx + w / 2.0;
-        let y2 = cy + h / 2.0;
-        Self::new([x1, y1, x2, y2], score, class_id)
-    }
-}
-
-impl fmt::Display for Detection {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Detection {{ class_id: {}, score: {:.2}, bbox: [{:.1}, {:.1}, {:.1}, {:.1}] }}",
-            self.class_id, self.score, self.bbox[0], self.bbox[1], self.bbox[2], self.bbox[3]
-        )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_detection_dimensions() {
-        let det = Detection::new([10.0, 20.0, 110.0, 170.0], 0.9, 1);
-        assert_eq!(det.width(), 100.0);
-        assert_eq!(det.height(), 150.0);
-        assert_eq!(det.area(), 15000.0);
-    }
-
-    #[test]
-    fn test_detection_center() {
-        let det = Detection::new([0.0, 0.0, 100.0, 100.0], 0.9, 1);
-        assert_eq!(det.center(), (50.0, 50.0));
-    }
-
-    #[test]
-    fn test_cxcywh_conversion() {
-        let det = Detection::new([10.0, 20.0, 110.0, 120.0], 0.9, 1);
-        let cxcywh = det.to_cxcywh();
-        assert_eq!(cxcywh, [60.0, 70.0, 100.0, 100.0]);
-
-        let det2 = Detection::from_cxcywh(cxcywh, 0.9, 1);
-        assert_eq!(det2.bbox, det.bbox);
-    }
+/// Detection with optional segmentation mask
+#[derive(Debug, Clone)]
+pub struct DetectionWithMask {
+    /// Base detection info
+    pub detection: Detection,
+    /// Optional binary mask for this detection [H, W] as flattened Vec<bool>
+    pub mask: Option<Vec<bool>>,
+    /// Mask dimensions (height, width)
+    pub mask_dims: Option<(usize, usize)>,
 }

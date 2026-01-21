@@ -1,5 +1,3 @@
-//! Eval subcommand for RF-DETR COCO evaluation.
-
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -7,23 +5,21 @@ use std::time::Instant;
 use candle_core::Device;
 use clap::Args;
 
-use crate::cmd_predict::{load_model, predict_image_raw, RawPrediction};
+use crate::cmd_predict::{load_model, predict_image_raw};
 use crate::coco_eval::{self, CocoEvaluator, ImagePrediction};
 use crate::config::RfDetrConfig;
+use crate::detection::RawPrediction;
 use crate::model::RfDetr;
 use crate::Which;
 
-/// Arguments for the eval subcommand
 #[derive(Args, Debug)]
 pub struct EvalArgs {
     /// Path to COCO dataset root (should contain 'annotations' and 'val2017' folders).
     #[arg(long)]
     pub coco_path: PathBuf,
-
     /// Output directory for evaluation results.
     #[arg(long, short, default_value = "eval_output")]
     pub output_dir: PathBuf,
-
     /// Load cached predictions instead of running inference.
     #[arg(long, short)]
     pub load_predictions: bool,

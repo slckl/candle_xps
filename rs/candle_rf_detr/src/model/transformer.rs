@@ -25,10 +25,6 @@
 use candle_core::{DType, IndexOp, Result, Tensor, D};
 use candle_nn::{linear, Linear, Module, VarBuilder};
 
-// =============================================================================
-// Helper Functions
-// =============================================================================
-
 /// Multi-Layer Perceptron (MLP / FFN)
 ///
 /// A simple feed-forward network with ReLU activations between layers.
@@ -37,14 +33,6 @@ pub struct Mlp {
 }
 
 impl Mlp {
-    /// Create a new MLP
-    ///
-    /// # Arguments
-    /// * `input_dim` - Input dimension
-    /// * `hidden_dim` - Hidden dimension for intermediate layers
-    /// * `output_dim` - Output dimension
-    /// * `num_layers` - Number of linear layers
-    /// * `vb` - VarBuilder for loading weights
     pub fn load(
         input_dim: usize,
         hidden_dim: usize,
@@ -342,44 +330,6 @@ impl MSDeformAttn {
         input_spatial_shapes: &[(usize, usize)],
         input_level_start_index: &[usize],
     ) -> Result<Tensor> {
-        self.forward_inner(
-            query,
-            reference_points,
-            input_flatten,
-            input_spatial_shapes,
-            input_level_start_index,
-            false,
-        )
-    }
-
-    /// Forward pass with debug output
-    pub fn forward_debug(
-        &self,
-        query: &Tensor,
-        reference_points: &Tensor,
-        input_flatten: &Tensor,
-        input_spatial_shapes: &[(usize, usize)],
-        input_level_start_index: &[usize],
-    ) -> Result<Tensor> {
-        self.forward_inner(
-            query,
-            reference_points,
-            input_flatten,
-            input_spatial_shapes,
-            input_level_start_index,
-            true,
-        )
-    }
-
-    fn forward_inner(
-        &self,
-        query: &Tensor,
-        reference_points: &Tensor,
-        input_flatten: &Tensor,
-        input_spatial_shapes: &[(usize, usize)],
-        input_level_start_index: &[usize],
-        debug: bool,
-    ) -> Result<Tensor> {
         let (n, len_q, _) = query.dims3()?;
         let (_, len_in, _) = input_flatten.dims3()?;
 
@@ -401,34 +351,6 @@ impl MSDeformAttn {
         let attention_weights = self.attention_weights.forward(query)?;
         let attention_weights =
             attention_weights.reshape((n, len_q, self.n_heads, self.n_levels * self.n_points))?;
-
-        // Debug output for query 7
-        if debug {
-            if let Ok(so_flat) = sampling_offsets
-                .narrow(1, 7, 1)?
-                .narrow(2, 0, 1)?
-                .narrow(3, 0, 1)?
-                .narrow(4, 0, 1)?
-                .flatten_all()?
-                .to_vec1::<f32>()
-            {
-                println!(
-                    "DEBUG MSDeformAttn sampling_offsets[0,7,0,0,0,:]: {:?}",
-                    &so_flat
-                );
-            }
-            if let Ok(aw_flat) = attention_weights
-                .narrow(1, 7, 1)?
-                .narrow(2, 0, 1)?
-                .flatten_all()?
-                .to_vec1::<f32>()
-            {
-                println!(
-                    "DEBUG MSDeformAttn attention_weights[0,7,0,:4]: {:?}",
-                    &aw_flat[..4.min(aw_flat.len())]
-                );
-            }
-        }
 
         // Compute sampling locations
         let ref_points_last_dim = reference_points.dim(D::Minus1)?;
@@ -481,23 +403,6 @@ impl MSDeformAttn {
             );
         };
 
-        // Debug sampling locations for query 7
-        if debug {
-            if let Ok(sl_flat) = sampling_locations
-                .narrow(1, 7, 1)?
-                .narrow(2, 0, 1)?
-                .narrow(3, 0, 1)?
-                .narrow(4, 0, 1)?
-                .flatten_all()?
-                .to_vec1::<f32>()
-            {
-                println!(
-                    "DEBUG MSDeformAttn sampling_locations[0,7,0,0,0,:]: {:?}",
-                    &sl_flat
-                );
-            }
-        }
-
         // Apply softmax to attention weights
         let attention_weights = candle_nn::ops::softmax_last_dim(&attention_weights)?;
 
@@ -508,23 +413,13 @@ impl MSDeformAttn {
             .reshape((n, self.n_heads, head_dim, len_in))?;
 
         // Core deformable attention computation
-        let output = if debug {
-            ms_deform_attn_core_debug(
-                &value,
-                input_spatial_shapes,
-                input_level_start_index,
-                &sampling_locations,
-                &attention_weights,
-            )?
-        } else {
-            ms_deform_attn_core(
-                &value,
-                input_spatial_shapes,
-                input_level_start_index,
-                &sampling_locations,
-                &attention_weights,
-            )?
-        };
+        let output = ms_deform_attn_core(
+            &value,
+            input_spatial_shapes,
+            input_level_start_index,
+            &sampling_locations,
+            &attention_weights,
+        )?;
 
         // Output projection
         self.output_proj.forward(&output)
@@ -547,41 +442,6 @@ fn ms_deform_attn_core(
     level_start_index: &[usize],
     sampling_locations: &Tensor,
     attention_weights: &Tensor,
-) -> Result<Tensor> {
-    ms_deform_attn_core_inner(
-        value,
-        spatial_shapes,
-        level_start_index,
-        sampling_locations,
-        attention_weights,
-        false,
-    )
-}
-
-fn ms_deform_attn_core_debug(
-    value: &Tensor,
-    spatial_shapes: &[(usize, usize)],
-    level_start_index: &[usize],
-    sampling_locations: &Tensor,
-    attention_weights: &Tensor,
-) -> Result<Tensor> {
-    ms_deform_attn_core_inner(
-        value,
-        spatial_shapes,
-        level_start_index,
-        sampling_locations,
-        attention_weights,
-        true,
-    )
-}
-
-fn ms_deform_attn_core_inner(
-    value: &Tensor,
-    spatial_shapes: &[(usize, usize)],
-    level_start_index: &[usize],
-    sampling_locations: &Tensor,
-    attention_weights: &Tensor,
-    debug: bool,
 ) -> Result<Tensor> {
     let (n, n_heads, head_dim, _) = value.dims4()?;
     let dims = sampling_locations.dims();
@@ -617,37 +477,6 @@ fn ms_deform_attn_core_inner(
         // Bilinear interpolation (grid_sample)
         // Output: [N*n_heads, head_dim, Len_q, n_points]
         let sampling_value_l = grid_sample_bilinear(&value_l, &sampling_grid_l)?;
-
-        // Debug output for query 7
-        if debug && lid == 0 {
-            // sampling_value_l: [N*n_heads, head_dim, Len_q, n_points]
-            // For query 7, head 0: sampling_value_l[0, :, 7, 0]
-            if let Ok(sv_flat) = sampling_value_l
-                .narrow(0, 0, 1)? // head 0
-                .narrow(2, 7, 1)? // query 7
-                .narrow(3, 0, 1)? // point 0
-                .flatten_all()?
-                .to_vec1::<f32>()
-            {
-                println!(
-                    "DEBUG ms_deform_attn sampled_value[head0, :4, query7, point0]: {:?}",
-                    &sv_flat[..4.min(sv_flat.len())]
-                );
-            }
-            // Also print the grid value used for query 7
-            if let Ok(sg_flat) = sampling_grid_l
-                .narrow(0, 0, 1)? // head 0
-                .narrow(1, 7, 1)? // query 7
-                .narrow(2, 0, 1)? // point 0
-                .flatten_all()?
-                .to_vec1::<f32>()
-            {
-                println!(
-                    "DEBUG ms_deform_attn grid[head0, query7, point0, :]: {:?}",
-                    &sg_flat
-                );
-            }
-        }
 
         sampling_value_list.push(sampling_value_l);
     }
@@ -814,9 +643,7 @@ fn grid_sample_bilinear(input: &Tensor, grid: &Tensor) -> Result<Tensor> {
 
 /// Multi-head Self-Attention
 pub struct MultiheadAttention {
-    /// Number of heads
     num_heads: usize,
-    /// Head dimension
     head_dim: usize,
     /// Combined QKV projection
     in_proj_weight: Tensor,
@@ -978,48 +805,6 @@ impl TransformerDecoderLayer {
         spatial_shapes: &[(usize, usize)],
         level_start_index: &[usize],
     ) -> Result<Tensor> {
-        self.forward_inner(
-            tgt,
-            memory,
-            query_pos,
-            reference_points,
-            spatial_shapes,
-            level_start_index,
-            false,
-        )
-    }
-
-    /// Forward pass with debug output
-    pub fn forward_debug(
-        &self,
-        tgt: &Tensor,
-        memory: &Tensor,
-        query_pos: &Tensor,
-        reference_points: &Tensor,
-        spatial_shapes: &[(usize, usize)],
-        level_start_index: &[usize],
-    ) -> Result<Tensor> {
-        self.forward_inner(
-            tgt,
-            memory,
-            query_pos,
-            reference_points,
-            spatial_shapes,
-            level_start_index,
-            true,
-        )
-    }
-
-    fn forward_inner(
-        &self,
-        tgt: &Tensor,
-        memory: &Tensor,
-        query_pos: &Tensor,
-        reference_points: &Tensor,
-        spatial_shapes: &[(usize, usize)],
-        level_start_index: &[usize],
-        debug: bool,
-    ) -> Result<Tensor> {
         // Self-attention
         let q = (tgt + query_pos)?;
         let k = &q;
@@ -1029,89 +814,18 @@ impl TransformerDecoderLayer {
         let tgt = (tgt + &tgt2)?;
         let tgt = self.norm1.forward(&tgt)?;
 
-        if debug {
-            if let Ok(t) = tgt
-                .narrow(1, 7, 1)?
-                .squeeze(1)?
-                .squeeze(0)?
-                .to_vec1::<f32>()
-            {
-                println!(
-                    "DEBUG DecoderLayer after self_attn+norm1 [7,:10]: {:?}",
-                    &t[..10]
-                );
-            }
-        }
-
         // Cross-attention (deformable)
         let q_with_pos = (&tgt + query_pos)?;
-        let tgt2 = if debug {
-            // Debug: print q_with_pos for query 7
-            if let Ok(qwp_flat) = q_with_pos
-                .narrow(1, 7, 1)?
-                .squeeze(1)?
-                .squeeze(0)?
-                .to_vec1::<f32>()
-            {
-                println!(
-                    "DEBUG DecoderLayer q_with_pos[7,:10]: {:?}",
-                    &qwp_flat[..10]
-                );
-            }
-            if let Ok(rp_flat) = reference_points
-                .narrow(1, 7, 1)?
-                .flatten_all()?
-                .to_vec1::<f32>()
-            {
-                println!("DEBUG DecoderLayer reference_points[7,:]: {:?}", &rp_flat);
-            }
-            self.cross_attn.forward_debug(
-                &q_with_pos,
-                reference_points,
-                memory,
-                spatial_shapes,
-                level_start_index,
-            )?
-        } else {
-            self.cross_attn.forward(
-                &q_with_pos,
-                reference_points,
-                memory,
-                spatial_shapes,
-                level_start_index,
-            )?
-        };
-
-        if debug {
-            if let Ok(t) = tgt2
-                .narrow(1, 7, 1)?
-                .squeeze(1)?
-                .squeeze(0)?
-                .to_vec1::<f32>()
-            {
-                println!(
-                    "DEBUG DecoderLayer cross_attn output [7,:10]: {:?}",
-                    &t[..10]
-                );
-            }
-        }
+        let tgt2 = self.cross_attn.forward(
+            &q_with_pos,
+            reference_points,
+            memory,
+            spatial_shapes,
+            level_start_index,
+        )?;
 
         let tgt = (&tgt + &tgt2)?;
         let tgt = self.norm2.forward(&tgt)?;
-
-        if debug {
-            if let Ok(t) = tgt
-                .narrow(1, 7, 1)?
-                .squeeze(1)?
-                .squeeze(0)?
-                .to_vec1::<f32>()
-            {
-                println!(
-                    "DEBUG DecoderLayer after cross_attn+norm2 [7,:10]: {:?}",
-                    &t[..10]
-                );
-            }
-        }
 
         // FFN
         let tgt2 = self.linear1.forward(&tgt)?;
@@ -1120,17 +834,6 @@ impl TransformerDecoderLayer {
 
         let tgt = (&tgt + &tgt2)?;
         let tgt = self.norm3.forward(&tgt)?;
-
-        if debug {
-            if let Ok(t) = tgt
-                .narrow(1, 7, 1)?
-                .squeeze(1)?
-                .squeeze(0)?
-                .to_vec1::<f32>()
-            {
-                println!("DEBUG DecoderLayer after FFN+norm3 [7,:10]: {:?}", &t[..10]);
-            }
-        }
 
         Ok(tgt)
     }
@@ -1202,11 +905,6 @@ impl TransformerDecoder {
             bbox_reparam,
             bbox_embed: None,
         })
-    }
-
-    /// Set the bbox embed for iterative refinement
-    pub fn set_bbox_embed(&mut self, bbox_embed: Mlp) {
-        self.bbox_embed = Some(bbox_embed);
     }
 
     /// Compute query position from reference points
@@ -1290,7 +988,7 @@ impl TransformerDecoder {
         };
 
         for (layer_id, layer) in self.layers.iter().enumerate() {
-            let (refpoints_input, query_pos, query_sine_embed) = if self.lite_refpoint_refine {
+            let (refpoints_input, query_pos, _query_sine_embed) = if self.lite_refpoint_refine {
                 let ref_for_sine = if self.bbox_reparam {
                     refpoints.clone()
                 } else {
@@ -1389,8 +1087,6 @@ pub struct Transformer {
     /// Configuration
     d_model: usize,
     num_queries: usize,
-    num_feature_levels: usize,
-    two_stage: bool,
     bbox_reparam: bool,
 }
 
@@ -1411,8 +1107,6 @@ impl Transformer {
         num_classes: usize,
         vb: VarBuilder,
     ) -> Result<Self> {
-        let two_stage = true; // RF-DETR always uses two-stage
-
         // Load decoder
         let decoder = TransformerDecoder::load(
             d_model,
@@ -1441,8 +1135,6 @@ impl Transformer {
             enc_out_bbox_embed,
             d_model,
             num_queries,
-            num_feature_levels,
-            two_stage,
             bbox_reparam,
         })
     }
@@ -1463,28 +1155,6 @@ impl Transformer {
         pos_embeds: &[Tensor],
         refpoint_embed: &Tensor,
         query_feat: &Tensor,
-    ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
-        self.forward_inner(srcs, pos_embeds, refpoint_embed, query_feat, false)
-    }
-
-    /// Forward with optional debug output
-    pub fn forward_debug(
-        &self,
-        srcs: &[Tensor],
-        pos_embeds: &[Tensor],
-        refpoint_embed: &Tensor,
-        query_feat: &Tensor,
-    ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
-        self.forward_inner(srcs, pos_embeds, refpoint_embed, query_feat, true)
-    }
-
-    fn forward_inner(
-        &self,
-        srcs: &[Tensor],
-        pos_embeds: &[Tensor],
-        refpoint_embed: &Tensor,
-        query_feat: &Tensor,
-        debug: bool,
     ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
         let mut src_flatten = Vec::new();
         let mut lvl_pos_embed_flatten = Vec::new();
@@ -1515,183 +1185,86 @@ impl Transformer {
         let bs = memory.dim(0)?;
 
         // Two-stage proposal generation
-        let (hs_enc, ref_enc, tgt, refpoints) = if self.two_stage {
-            // Generate proposals from encoder output
-            let (output_memory, output_proposals) =
-                gen_encoder_output_proposals(&memory, &spatial_shapes, self.bbox_reparam)?;
+        // Generate proposals from encoder output
+        let (output_memory, output_proposals) =
+            gen_encoder_output_proposals(&memory, &spatial_shapes, self.bbox_reparam)?;
 
-            // Project and normalize
-            let output_memory = self.enc_output.forward(&output_memory)?;
-            let output_memory = self.enc_output_norm.forward(&output_memory)?;
+        // Project and normalize
+        let output_memory = self.enc_output.forward(&output_memory)?;
+        let output_memory = self.enc_output_norm.forward(&output_memory)?;
 
-            // Compute class scores and bbox deltas
-            let enc_outputs_class = self.enc_out_class_embed.forward(&output_memory)?;
-            let enc_outputs_coord_delta = self.enc_out_bbox_embed.forward(&output_memory)?;
+        // Compute class scores and bbox deltas
+        let enc_outputs_class = self.enc_out_class_embed.forward(&output_memory)?;
+        let enc_outputs_coord_delta = self.enc_out_bbox_embed.forward(&output_memory)?;
 
-            // Compute coordinates
-            let enc_outputs_coord = if self.bbox_reparam {
-                let delta_xy = enc_outputs_coord_delta.narrow(D::Minus1, 0, 2)?;
-                let delta_wh = enc_outputs_coord_delta.narrow(D::Minus1, 2, 2)?;
-                let prop_xy = output_proposals.narrow(D::Minus1, 0, 2)?;
-                let prop_wh = output_proposals.narrow(D::Minus1, 2, 2)?;
+        // Compute coordinates
+        let enc_outputs_coord = if self.bbox_reparam {
+            let delta_xy = enc_outputs_coord_delta.narrow(D::Minus1, 0, 2)?;
+            let delta_wh = enc_outputs_coord_delta.narrow(D::Minus1, 2, 2)?;
+            let prop_xy = output_proposals.narrow(D::Minus1, 0, 2)?;
+            let prop_wh = output_proposals.narrow(D::Minus1, 2, 2)?;
 
-                let coord_xy = delta_xy.mul(&prop_wh)?.add(&prop_xy)?;
-                let coord_wh = delta_wh.exp()?.mul(&prop_wh)?;
-                Tensor::cat(&[&coord_xy, &coord_wh], D::Minus1)?
-            } else {
-                (self.enc_out_bbox_embed.forward(&output_memory)? + &output_proposals)?
-            };
-
-            // Select top-k proposals
-            let topk = self.num_queries.min(enc_outputs_class.dim(1)?);
-
-            // Get max class score per proposal
-            let class_scores = enc_outputs_class.max(D::Minus1)?;
-
-            if debug {
-                let cs_flat = class_scores.flatten_all()?.to_vec1::<f32>()?;
-                let max_score = cs_flat.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                let min_score = cs_flat.iter().cloned().fold(f32::INFINITY, f32::min);
-                println!(
-                    "DEBUG Two-stage class_scores: shape={:?}, max={:.4}, min={:.4}",
-                    class_scores.dims(),
-                    max_score,
-                    min_score
-                );
-            }
-
-            // Argsort to get top-k indices
-            let (_, topk_indices) = class_scores.sort_last_dim(false)?;
-            let topk_indices = topk_indices.narrow(1, 0, topk)?;
-
-            if debug {
-                let idx_flat = topk_indices
-                    .narrow(0, 0, 1)?
-                    .narrow(1, 0, 10)?
-                    .flatten_all()?
-                    .to_vec1::<u32>()?;
-                println!("DEBUG Two-stage topk_indices (first 10): {:?}", idx_flat);
-
-                // Print scores for first 10 selected proposals
-                let scores_flat = class_scores.flatten_all()?.to_vec1::<f32>()?;
-                println!("DEBUG Two-stage scores for first 10 selected:");
-                for (i, &idx) in idx_flat.iter().enumerate() {
-                    println!(
-                        "  Query {}: proposal_idx={}, score={:.4}",
-                        i, idx, scores_flat[idx as usize]
-                    );
-                }
-
-                // Print encoder coords for first 10 selected
-                let coords_flat: Vec<f32> = enc_outputs_coord.flatten_all()?.to_vec1()?;
-                println!("DEBUG Two-stage encoder coords for first 10 selected:");
-                for (i, &idx) in idx_flat.iter().enumerate() {
-                    let base = (idx as usize) * 4;
-                    println!(
-                        "  Query {}: cx={:.4}, cy={:.4}, w={:.4}, h={:.4}",
-                        i,
-                        coords_flat[base],
-                        coords_flat[base + 1],
-                        coords_flat[base + 2],
-                        coords_flat[base + 3]
-                    );
-                }
-            }
-
-            // Gather top-k proposals
-            let topk_indices_coord = topk_indices
-                .unsqueeze(D::Minus1)?
-                .repeat((1, 1, 4))?
-                .to_dtype(DType::I64)?;
-            let topk_indices_feat = topk_indices
-                .unsqueeze(D::Minus1)?
-                .repeat((1, 1, self.d_model))?
-                .to_dtype(DType::I64)?;
-
-            let ref_enc = enc_outputs_coord.gather(&topk_indices_coord, 1)?;
-            let hs_enc = output_memory.gather(&topk_indices_feat, 1)?;
-
-            if debug {
-                let ref_flat = ref_enc
-                    .narrow(0, 0, 1)?
-                    .narrow(1, 0, 1)?
-                    .flatten_all()?
-                    .to_vec1::<f32>()?;
-                println!("DEBUG Two-stage ref_enc[0,0,:]: {:?}", ref_flat);
-            }
-
-            // Prepare decoder inputs
-            // tgt: expand query_feat for batch
-            let tgt = query_feat.unsqueeze(0)?.repeat((bs, 1, 1))?;
-
-            // refpoint_embed: combine with two-stage proposals
-            let refpoint_embed = refpoint_embed.unsqueeze(0)?.repeat((bs, 1, 1))?;
-
-            // In export mode with lite_refpoint_refine, we use ts proposals directly
-            let ts_len = ref_enc.dim(1)?;
-            let refpoint_ts = refpoint_embed.narrow(1, 0, ts_len)?;
-            let refpoint_rest = refpoint_embed.narrow(1, ts_len, self.num_queries - ts_len)?;
-
-            let refpoints = if self.bbox_reparam {
-                // Combine ts refpoints with learned offsets
-                let ref_xy = refpoint_ts.narrow(D::Minus1, 0, 2)?;
-                let ref_wh = refpoint_ts.narrow(D::Minus1, 2, 2)?;
-                let ts_xy = ref_enc.narrow(D::Minus1, 0, 2)?;
-                let ts_wh = ref_enc.narrow(D::Minus1, 2, 2)?;
-
-                if debug {
-                    let ref_xy_flat = ref_xy
-                        .narrow(0, 0, 1)?
-                        .narrow(1, 0, 1)?
-                        .flatten_all()?
-                        .to_vec1::<f32>()?;
-                    let ref_wh_flat = ref_wh
-                        .narrow(0, 0, 1)?
-                        .narrow(1, 0, 1)?
-                        .flatten_all()?
-                        .to_vec1::<f32>()?;
-                    let ts_xy_flat = ts_xy
-                        .narrow(0, 0, 1)?
-                        .narrow(1, 0, 1)?
-                        .flatten_all()?
-                        .to_vec1::<f32>()?;
-                    let ts_wh_flat = ts_wh
-                        .narrow(0, 0, 1)?
-                        .narrow(1, 0, 1)?
-                        .flatten_all()?
-                        .to_vec1::<f32>()?;
-                    println!(
-                        "DEBUG refpoint combine: ref_xy={:?}, ref_wh={:?}, ts_xy={:?}, ts_wh={:?}",
-                        ref_xy_flat, ref_wh_flat, ts_xy_flat, ts_wh_flat
-                    );
-                }
-
-                let new_xy = ref_xy.mul(&ts_wh)?.add(&ts_xy)?;
-                let new_wh = ref_wh.exp()?.mul(&ts_wh)?;
-                let combined = Tensor::cat(&[&new_xy, &new_wh], D::Minus1)?;
-
-                if debug {
-                    let comb_flat = combined
-                        .narrow(0, 0, 1)?
-                        .narrow(1, 0, 1)?
-                        .flatten_all()?
-                        .to_vec1::<f32>()?;
-                    println!("DEBUG combined refpoints[0,0,:]: {:?}", comb_flat);
-                }
-
-                if self.num_queries > ts_len {
-                    Tensor::cat(&[&combined, &refpoint_rest], 1)?
-                } else {
-                    combined
-                }
-            } else {
-                let zeros = Tensor::zeros_like(&refpoint_embed)?;
-                (&refpoint_embed + &ref_enc.broadcast_add(&zeros)?)?
-            };
-
-            (hs_enc, ref_enc, tgt, refpoints)
+            let coord_xy = delta_xy.mul(&prop_wh)?.add(&prop_xy)?;
+            let coord_wh = delta_wh.exp()?.mul(&prop_wh)?;
+            Tensor::cat(&[&coord_xy, &coord_wh], D::Minus1)?
         } else {
-            candle_core::bail!("Non-two-stage mode not implemented");
+            (self.enc_out_bbox_embed.forward(&output_memory)? + &output_proposals)?
+        };
+
+        // Select top-k proposals
+        let topk = self.num_queries.min(enc_outputs_class.dim(1)?);
+
+        // Get max class score per proposal
+        let class_scores = enc_outputs_class.max(D::Minus1)?;
+
+        // Argsort to get top-k indices
+        let (_, topk_indices) = class_scores.sort_last_dim(false)?;
+        let topk_indices = topk_indices.narrow(1, 0, topk)?;
+
+        // Gather top-k proposals
+        let topk_indices_coord = topk_indices
+            .unsqueeze(D::Minus1)?
+            .repeat((1, 1, 4))?
+            .to_dtype(DType::I64)?;
+        let topk_indices_feat = topk_indices
+            .unsqueeze(D::Minus1)?
+            .repeat((1, 1, self.d_model))?
+            .to_dtype(DType::I64)?;
+
+        let ref_enc = enc_outputs_coord.gather(&topk_indices_coord, 1)?;
+        let hs_enc = output_memory.gather(&topk_indices_feat, 1)?;
+
+        // Prepare decoder inputs
+        // tgt: expand query_feat for batch
+        let tgt = query_feat.unsqueeze(0)?.repeat((bs, 1, 1))?;
+
+        // refpoint_embed: combine with two-stage proposals
+        let refpoint_embed = refpoint_embed.unsqueeze(0)?.repeat((bs, 1, 1))?;
+
+        // In export mode with lite_refpoint_refine, we use ts proposals directly
+        let ts_len = ref_enc.dim(1)?;
+        let refpoint_ts = refpoint_embed.narrow(1, 0, ts_len)?;
+        let refpoint_rest = refpoint_embed.narrow(1, ts_len, self.num_queries - ts_len)?;
+
+        let refpoints = if self.bbox_reparam {
+            // Combine ts refpoints with learned offsets
+            let ref_xy = refpoint_ts.narrow(D::Minus1, 0, 2)?;
+            let ref_wh = refpoint_ts.narrow(D::Minus1, 2, 2)?;
+            let ts_xy = ref_enc.narrow(D::Minus1, 0, 2)?;
+            let ts_wh = ref_enc.narrow(D::Minus1, 2, 2)?;
+
+            let new_xy = ref_xy.mul(&ts_wh)?.add(&ts_xy)?;
+            let new_wh = ref_wh.exp()?.mul(&ts_wh)?;
+            let combined = Tensor::cat(&[&new_xy, &new_wh], D::Minus1)?;
+
+            if self.num_queries > ts_len {
+                Tensor::cat(&[&combined, &refpoint_rest], 1)?
+            } else {
+                combined
+            }
+        } else {
+            let zeros = Tensor::zeros_like(&refpoint_embed)?;
+            (&refpoint_embed + &ref_enc.broadcast_add(&zeros)?)?
         };
 
         // Run decoder
@@ -1714,10 +1287,6 @@ impl Transformer {
         Ok((hs, references, hs_enc, ref_enc_out))
     }
 }
-
-// =============================================================================
-// Tests
-// =============================================================================
 
 #[cfg(test)]
 mod tests {

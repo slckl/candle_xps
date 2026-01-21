@@ -29,19 +29,13 @@ pub struct LayerNorm2d {
     weight: Tensor,
     bias: Tensor,
     eps: f64,
-    normalized_shape: usize,
 }
 
 impl LayerNorm2d {
-    pub fn load(vb: VarBuilder, normalized_shape: usize, eps: f64) -> Result<Self> {
-        let weight = vb.get(normalized_shape, "weight")?;
-        let bias = vb.get(normalized_shape, "bias")?;
-        Ok(Self {
-            weight,
-            bias,
-            eps,
-            normalized_shape,
-        })
+    pub fn load(vb: VarBuilder, shape: usize, eps: f64) -> Result<Self> {
+        let weight = vb.get(shape, "weight")?;
+        let bias = vb.get(shape, "bias")?;
+        Ok(Self { weight, bias, eps })
     }
 
     pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
@@ -132,9 +126,15 @@ impl ConvX {
         let x = self.conv.forward(&x)?;
         let x = self.bn.forward(&x)?;
         match self.activation {
-            Activation::Silu => candle_nn::ops::silu(&x),
+            Activation::Silu => x.silu(),
             Activation::Relu => x.relu(),
         }
+    }
+}
+
+impl Module for ConvX {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
+        self.forward(x)
     }
 }
 
@@ -234,8 +234,8 @@ impl Bottleneck {
         // e=1.0 means hidden channels = c2
         let c_ = c2; // hidden channels (e=1.0)
 
-        let cv1 = ConvX::load(vb.pp("cv1"), c1, c_, 3, 1)?;
-        let cv2 = ConvX::load(vb.pp("cv2"), c_, c2, 3, 1)?;
+        let cv1 = ConvX::load_with_activation(vb.pp("cv1"), c1, c_, 3, 1, Activation::Silu)?;
+        let cv2 = ConvX::load_with_activation(vb.pp("cv2"), c_, c2, 3, 1, Activation::Silu)?;
 
         let add = shortcut && c1 == c2;
 
@@ -261,7 +261,8 @@ impl Bottleneck {
 /// - Concatenate all parts: [first_split, second_split, bottleneck_0_out, ..., bottleneck_n-1_out]
 /// - cv2: ConvX that takes (2 + n) * c channels and outputs out_channels
 pub struct C2f {
-    c: usize, // hidden channels
+    // hidden channels
+    c: usize,
     cv1: ConvX,
     cv2: ConvX,
     bottlenecks: Vec<Bottleneck>,
@@ -385,8 +386,6 @@ impl ProjectorConfig {
 /// - stages_sampling[1] (P5): ConvX downsample per feature
 /// - stages contains: C2f -> LayerNorm for each scale
 pub struct MultiScaleProjector {
-    /// Scale factors for each output level
-    scale_factors: Vec<f64>,
     /// Sampling modules for each scale and each input feature
     /// Outer vec: per scale, Inner vec: per input feature
     stages_sampling: Vec<Vec<SamplingModule>>,
@@ -441,7 +440,6 @@ impl MultiScaleProjector {
         }
 
         Ok(Self {
-            scale_factors: config.scale_factors.clone(),
             stages_sampling,
             c2f_modules,
             layer_norms,
@@ -507,15 +505,6 @@ mod tests {
     use super::*;
     use candle_core::DType;
     use candle_core::Device;
-
-    #[test]
-    fn test_projector_config_small() {
-        let config = ProjectorConfig::small(256, 384, 4);
-        assert_eq!(config.in_channels, vec![384, 384, 384, 384]);
-        assert_eq!(config.out_channels, 256);
-        assert_eq!(config.scale_factors, vec![1.0]);
-        assert_eq!(config.num_blocks, 3);
-    }
 
     /// Integration test comparing projector output against Python reference
     ///

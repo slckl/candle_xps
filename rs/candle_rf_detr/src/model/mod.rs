@@ -1,7 +1,3 @@
-//! RF-DETR Model Implementation
-//!
-//! This module provides the main RF-DETR model structure and loading functionality.
-//!
 pub mod dino2;
 pub mod pos_enc;
 pub mod projector;
@@ -20,10 +16,10 @@ use crate::model::query_embed::QueryEmbeddings;
 use crate::model::segmentation_head::{SegmentationHead, SegmentationHeadConfig};
 use crate::model::transformer::{Mlp, Transformer};
 
-/// RF-DETR Object Detection Model
+/// RF-DETR Object Detection/Instance Segmentation Model
 ///
 /// This struct holds the loaded model weights and configuration
-/// for performing object detection inference.
+/// for performing object detection and optional instance segmentation inference.
 pub struct RfDetr {
     /// Model configuration
     pub config: RfDetrConfig,
@@ -68,6 +64,7 @@ impl RfDetr {
         let backbone_encoder =
             DinoV2Encoder::load(vb.pp("backbone.0.encoder.encoder"), &dino_config)?;
 
+        // TODO use values from config, instead of hardcoded...
         // Load projector
         // Weight path: backbone.0.projector.*
         // Use different config based on scale factors
@@ -104,7 +101,8 @@ impl RfDetr {
 
         // Load transformer
         // Weight path: transformer.*
-        let dim_feedforward = 2048; // Standard for RF-DETR
+        // Dim is same for all RF-DETR pretrained models so far...
+        let dim_feedforward = 2048;
         let transformer = Transformer::load(
             config.hidden_dim,
             config.sa_nheads,
@@ -158,40 +156,6 @@ impl RfDetr {
         })
     }
 
-    /// Run the backbone encoder to get multi-scale feature maps
-    ///
-    /// # Arguments
-    /// * `pixel_values` - Input tensor of shape [batch_size, 3, height, width]
-    ///
-    /// # Returns
-    /// A vector of feature maps at different scales, each with shape [batch_size, encoder_hidden_dim, h, w]
-    pub fn backbone_encoder_forward(&self, pixel_values: &Tensor) -> Result<Vec<Tensor>> {
-        self.backbone_encoder.forward(pixel_values)
-    }
-
-    /// Run the projector to project encoder features to hidden_dim
-    ///
-    /// # Arguments
-    /// * `encoder_outputs` - Vector of feature maps from backbone encoder
-    ///
-    /// # Returns
-    /// A vector of projected feature maps, each with shape [batch_size, hidden_dim, h, w]
-    pub fn projector_forward(&self, encoder_outputs: &[Tensor]) -> Result<Vec<Tensor>> {
-        self.projector.forward(encoder_outputs)
-    }
-
-    /// Run the full backbone (encoder + projector)
-    ///
-    /// # Arguments
-    /// * `pixel_values` - Input tensor of shape [batch_size, 3, height, width]
-    ///
-    /// # Returns
-    /// A vector of projected feature maps, each with shape [batch_size, hidden_dim, h, w]
-    pub fn backbone_forward(&self, pixel_values: &Tensor) -> Result<Vec<Tensor>> {
-        let encoder_outputs = self.backbone_encoder_forward(pixel_values)?;
-        self.projector_forward(&encoder_outputs)
-    }
-
     /// Compute position encodings for feature maps
     ///
     /// # Arguments
@@ -215,81 +179,7 @@ impl RfDetr {
         Ok(pos_encodings)
     }
 
-    /// Run transformer forward pass (steps 09-12)
-    ///
-    /// # Arguments
-    /// * `projector_outputs` - Feature maps from projector
-    /// * `position_encodings` - Position encodings
-    ///
-    /// # Returns
-    /// (decoder_hs, decoder_ref, encoder_hs, encoder_ref)
-    pub fn transformer_forward(
-        &self,
-        projector_outputs: &[Tensor],
-        position_encodings: &[Tensor],
-    ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
-        self.transformer.forward(
-            projector_outputs,
-            position_encodings,
-            self.query_embeddings.refpoint_embed(),
-            self.query_embeddings.query_feat(),
-        )
-    }
-
-    /// Check if model has segmentation head
-    pub fn has_segmentation_head(&self) -> bool {
-        self.segmentation_head.is_some()
-    }
-
     /// Run full inference on an input image
-    ///
-    /// # Arguments
-    /// * `pixel_values` - Preprocessed input tensor [batch_size, 3, height, width]
-    ///
-    /// # Returns
-    /// Tuple of (class_logits, bbox_predictions) where:
-    /// - class_logits: [batch_size, num_queries, num_classes]
-    /// - bbox_predictions: [batch_size, num_queries, 4] in (cx, cy, w, h) format
-    pub fn forward(&self, pixel_values: &Tensor) -> Result<(Tensor, Tensor)> {
-        // Steps 04-05: Backbone encoder + projector
-        let projector_outputs = self.backbone_forward(pixel_values)?;
-
-        // Step 06: Position encoding
-        let position_encodings =
-            self.compute_position_encodings(&projector_outputs, pixel_values.device())?;
-
-        // Steps 09-12: Transformer
-        let (decoder_hs, decoder_ref, _encoder_hs, _encoder_ref) =
-            self.transformer_forward(&projector_outputs, &position_encodings)?;
-
-        // Steps 13-17: Class and bbox predictions
-        // Bbox prediction with reparameterization
-        let outputs_coord = if self.config.bbox_reparam {
-            let outputs_coord_delta = self.bbox_embed.forward(&decoder_hs)?;
-
-            let ref_xy = decoder_ref.narrow(candle_core::D::Minus1, 0, 2)?;
-            let ref_wh = decoder_ref.narrow(candle_core::D::Minus1, 2, 2)?;
-            let delta_xy = outputs_coord_delta.narrow(candle_core::D::Minus1, 0, 2)?;
-            let delta_wh = outputs_coord_delta.narrow(candle_core::D::Minus1, 2, 2)?;
-
-            let outputs_coord_cxcy = delta_xy.mul(&ref_wh)?.add(&ref_xy)?;
-            let outputs_coord_wh = delta_wh.exp()?.mul(&ref_wh)?;
-            Tensor::cat(
-                &[&outputs_coord_cxcy, &outputs_coord_wh],
-                candle_core::D::Minus1,
-            )?
-        } else {
-            let bbox_delta = self.bbox_embed.forward(&decoder_hs)?;
-            candle_nn::ops::sigmoid(&(bbox_delta + &decoder_ref)?)?
-        };
-
-        // Classification
-        let outputs_class = self.class_embed.forward(&decoder_hs)?;
-
-        Ok((outputs_class, outputs_coord))
-    }
-
-    /// Run full inference with segmentation output
     ///
     /// # Arguments
     /// * `pixel_values` - Preprocessed input tensor [batch_size, 3, height, width]
@@ -298,23 +188,27 @@ impl RfDetr {
     /// Tuple of (class_logits, bbox_predictions, mask_logits) where:
     /// - class_logits: [batch_size, num_queries, num_classes]
     /// - bbox_predictions: [batch_size, num_queries, 4] in (cx, cy, w, h) format
-    /// - mask_logits: [batch_size, num_queries, H', W'] where H' = resolution / downsample_ratio
-    pub fn forward_with_masks(&self, pixel_values: &Tensor) -> Result<(Tensor, Tensor, Tensor)> {
-        let seg_head = self.segmentation_head.as_ref().ok_or_else(|| {
-            candle_core::Error::Msg("Model does not have segmentation head".into())
-        })?;
+    /// - mask_logits: optional, [batch_size, num_queries, H', W'] where H' = resolution / downsample_ratio
+    pub fn forward(&self, pixel_values: &Tensor) -> Result<(Tensor, Tensor, Option<Tensor>)> {
+        // Dino2 windowed backbone -> multi-scale projector -> position encodings -> transformer -> class + bbox heads + seg head
 
-        // Steps 04-05: Backbone encoder + projector
-        let encoder_outputs = self.backbone_encoder_forward(pixel_values)?;
-        let projector_outputs = self.projector_forward(&encoder_outputs)?;
+        // Backbone -> projector
+        // [batch_size, 3, height, width] -> [batch_size, encoder_hidden_dim, h, w]
+        let encoder_outputs = self.backbone_encoder.forward(pixel_values)?;
+        // [batch_size, encoder_hidden_dim, h, w] -> [batch_size, hidden_dim, h, w]
+        let projector_outputs = self.projector.forward(&encoder_outputs)?;
 
         // Step 06: Position encoding
         let position_encodings =
             self.compute_position_encodings(&projector_outputs, pixel_values.device())?;
 
         // Steps 09-12: Transformer
-        let (decoder_hs, decoder_ref, _encoder_hs, _encoder_ref) =
-            self.transformer_forward(&projector_outputs, &position_encodings)?;
+        let (decoder_hs, decoder_ref, _encoder_hs, _encoder_ref) = self.transformer.forward(
+            &projector_outputs,
+            &position_encodings,
+            &self.query_embeddings.refpoint_embed,
+            &self.query_embeddings.query_feat,
+        )?;
 
         // Steps 13-17: Class and bbox predictions
         // Bbox prediction with reparameterization
@@ -340,136 +234,17 @@ impl RfDetr {
         // Classification
         let outputs_class = self.class_embed.forward(&decoder_hs)?;
 
-        // Segmentation masks
-        // Use the first projector output (srcs[0]) as spatial features
-        let spatial_features = &projector_outputs[0];
-        let (_, _, input_h, input_w) = pixel_values.dims4()?;
-        let mask_logits = seg_head.forward(spatial_features, &decoder_hs, input_h, input_w)?;
-
-        Ok((outputs_class, outputs_coord, mask_logits))
-    }
-
-    /// Run full inference with debug output for comparing with Python.
-    pub fn forward_debug(&self, pixel_values: &Tensor) -> Result<(Tensor, Tensor)> {
-        // Steps 04: Backbone encoder
-        let encoder_outputs = self.backbone_encoder_forward(pixel_values)?;
-        println!("DEBUG Encoder output:");
-        for (i, out) in encoder_outputs.iter().enumerate() {
-            let flat = out.flatten_all()?.to_vec1::<f32>()?;
-            let mean: f32 = flat.iter().sum::<f32>() / flat.len() as f32;
-            let variance: f32 =
-                flat.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / flat.len() as f32;
-            let std = variance.sqrt();
-            println!(
-                "  [{}] shape: {:?}, mean: {:.4}, std: {:.4}",
-                i,
-                out.dims(),
-                mean,
-                std
-            );
-        }
-
-        // Step 05: Projector
-        let projector_outputs = self.projector_forward(&encoder_outputs)?;
-        println!("DEBUG Projector output:");
-        for (i, out) in projector_outputs.iter().enumerate() {
-            let flat = out.flatten_all()?.to_vec1::<f32>()?;
-            let mean: f32 = flat.iter().sum::<f32>() / flat.len() as f32;
-            let variance: f32 =
-                flat.iter().map(|x| (x - mean).powi(2)).sum::<f32>() / flat.len() as f32;
-            let std = variance.sqrt();
-            println!(
-                "  [{}] shape: {:?}, mean: {:.4}, std: {:.4}",
-                i,
-                out.dims(),
-                mean,
-                std
-            );
-        }
-
-        // Step 06: Position encoding
-        let position_encodings =
-            self.compute_position_encodings(&projector_outputs, pixel_values.device())?;
-
-        // Debug: Print query embeddings
-        let refpoint_flat = self
-            .query_embeddings
-            .refpoint_embed()
-            .flatten_all()?
-            .to_vec1::<f32>()?;
-        println!("DEBUG refpoint_embed first query (first 4 values):");
-        println!("  {:?}", &refpoint_flat[..4]);
-
-        let query_feat_flat = self
-            .query_embeddings
-            .query_feat()
-            .flatten_all()?
-            .to_vec1::<f32>()?;
-        println!("DEBUG query_feat first query (first 10 values):");
-        println!("  {:?}", &query_feat_flat[..10]);
-
-        // Steps 09-12: Transformer
-        let (decoder_hs, decoder_ref, _encoder_hs, _encoder_ref) =
-            self.transformer_forward(&projector_outputs, &position_encodings)?;
-
-        println!("DEBUG Transformer output:");
-        let hs_flat = decoder_hs.flatten_all()?.to_vec1::<f32>()?;
-        let hs_mean: f32 = hs_flat.iter().sum::<f32>() / hs_flat.len() as f32;
-        println!(
-            "  decoder_hs shape: {:?}, mean: {:.4}",
-            decoder_hs.dims(),
-            hs_mean
-        );
-        let ref_flat = decoder_ref.flatten_all()?.to_vec1::<f32>()?;
-        let ref_mean: f32 = ref_flat.iter().sum::<f32>() / ref_flat.len() as f32;
-        println!(
-            "  decoder_ref shape: {:?}, mean: {:.4}",
-            decoder_ref.dims(),
-            ref_mean
-        );
-
-        // Print first query hidden state for comparison with Python
-        // decoder_hs is [1, 300, 256], get [0, 0, :] = first query of first batch
-        let first_query_hs = decoder_hs
-            .narrow(0, 0, 1)?
-            .narrow(1, 0, 1)?
-            .squeeze(0)?
-            .squeeze(0)?
-            .to_vec1::<f32>()?;
-        println!("DEBUG First query hidden state (first 20 values):");
-        println!("  {:?}", &first_query_hs[..20]);
-
-        // Steps 13-17: Class and bbox predictions
-        // First, let's check the class_embed output for query 0
-        let outputs_class = self.class_embed.forward(&decoder_hs)?;
-        let first_query_logits = outputs_class
-            .narrow(0, 0, 1)?
-            .narrow(1, 0, 1)?
-            .squeeze(0)?
-            .squeeze(0)?
-            .to_vec1::<f32>()?;
-        println!("DEBUG Class logits for query 0 (first 10):");
-        println!("  {:?}", &first_query_logits[..10]);
-
-        let outputs_coord = if self.config.bbox_reparam {
-            let outputs_coord_delta = self.bbox_embed.forward(&decoder_hs)?;
-
-            let ref_xy = decoder_ref.narrow(candle_core::D::Minus1, 0, 2)?;
-            let ref_wh = decoder_ref.narrow(candle_core::D::Minus1, 2, 2)?;
-            let delta_xy = outputs_coord_delta.narrow(candle_core::D::Minus1, 0, 2)?;
-            let delta_wh = outputs_coord_delta.narrow(candle_core::D::Minus1, 2, 2)?;
-
-            let outputs_coord_cxcy = delta_xy.mul(&ref_wh)?.add(&ref_xy)?;
-            let outputs_coord_wh = delta_wh.exp()?.mul(&ref_wh)?;
-            Tensor::cat(
-                &[&outputs_coord_cxcy, &outputs_coord_wh],
-                candle_core::D::Minus1,
-            )?
+        // Optional segmentation masks.
+        let mask_logits = if let Some(seg_head) = &self.segmentation_head {
+            // Use the first projector output (srcs[0]) as spatial features
+            let spatial_features = &projector_outputs[0];
+            let (_, _, input_h, input_w) = pixel_values.dims4()?;
+            let mask_logits = seg_head.forward(spatial_features, &decoder_hs, input_h, input_w)?;
+            Some(mask_logits)
         } else {
-            let bbox_delta = self.bbox_embed.forward(&decoder_hs)?;
-            candle_nn::ops::sigmoid(&(bbox_delta + &decoder_ref)?)?
+            None
         };
 
-        Ok((outputs_class, outputs_coord))
+        Ok((outputs_class, outputs_coord, mask_logits))
     }
 }

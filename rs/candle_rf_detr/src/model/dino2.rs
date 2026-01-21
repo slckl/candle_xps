@@ -32,10 +32,6 @@ pub struct Dinov2Config {
     pub patch_size: usize,
     /// Number of input channels (typically 3 for RGB)
     pub num_channels: usize,
-    /// Whether to use bias in QKV projections
-    pub qkv_bias: bool,
-    /// Initial value for layer scale parameters
-    pub layerscale_value: f64,
     /// Number of register tokens (0 for RF-DETR small)
     pub num_register_tokens: usize,
     /// Number of windows for windowed attention
@@ -84,8 +80,6 @@ impl Dinov2Config {
             image_size,
             patch_size,
             num_channels: 3,
-            qkv_bias: true,
-            layerscale_value: 1.0,
             num_register_tokens: 0,
             num_windows,
             window_block_indexes,
@@ -125,8 +119,6 @@ impl Dinov2Config {
             image_size,
             patch_size,
             num_channels: 3,
-            qkv_bias: true,
-            layerscale_value: 1.0,
             num_register_tokens: 0, // RF-DETR doesn't use register tokens
             num_windows,
             window_block_indexes,
@@ -141,28 +133,15 @@ impl Dinov2Config {
         self.hidden_size / self.num_attention_heads
     }
 
-    /// Get the number of patches for a given image size
-    pub fn num_patches(&self, height: usize, width: usize) -> usize {
-        (height / self.patch_size) * (width / self.patch_size)
-    }
-
     /// Check if a layer index uses windowed attention
     pub fn is_windowed_layer(&self, layer_idx: usize) -> bool {
         self.window_block_indexes.contains(&layer_idx)
-    }
-
-    /// Get the output stage index from stage name (e.g., "stage3" -> 3)
-    pub fn get_stage_index(stage_name: &str) -> Option<usize> {
-        stage_name
-            .strip_prefix("stage")
-            .and_then(|s| s.parse().ok())
     }
 }
 
 /// Patch embeddings using a Conv2d projection
 pub struct PatchEmbeddings {
     projection: Conv2d,
-    patch_size: usize,
 }
 
 impl PatchEmbeddings {
@@ -178,10 +157,7 @@ impl PatchEmbeddings {
             conv_config,
             vb.pp("projection"),
         )?;
-        Ok(Self {
-            projection,
-            patch_size: config.patch_size,
-        })
+        Ok(Self { projection })
     }
 
     pub fn forward(&self, pixel_values: &Tensor) -> Result<Tensor> {
@@ -767,7 +743,6 @@ mod tests {
         assert_eq!(config.hidden_size, 384);
         assert_eq!(config.num_attention_heads, 6);
         assert_eq!(config.attention_head_size(), 64);
-        assert_eq!(config.num_patches(512, 512), 1024);
 
         // Layers 3, 6, 9 (using 1-indexed stage numbers) should use full attention
         // Layer 12 doesn't exist in a 12-layer model (layers are 0-11)
@@ -793,7 +768,6 @@ mod tests {
         assert_eq!(config.hidden_size, 768);
         assert_eq!(config.num_attention_heads, 12);
         assert_eq!(config.attention_head_size(), 64);
-        assert_eq!(config.num_patches(560, 560), 1600);
     }
 
     /// Integration test comparing backbone encoder output against Python reference

@@ -11,50 +11,23 @@ use image::{DynamicImage, Rgba};
 use crate::coco_classes;
 use crate::config::RfDetrConfig;
 use crate::detection::Detection;
+use crate::detection::DetectionWithMask;
+use crate::detection::RawPrediction;
 use crate::model::RfDetr;
 use crate::preprocess;
 use crate::Which;
-
-/// Raw prediction output before thresholding.
-/// Contains all queries with their scores, labels, and boxes.
-#[derive(Debug, Clone)]
-pub struct RawPrediction {
-    /// Confidence scores for each query (max across classes)
-    pub scores: Vec<f32>,
-    /// Class labels for each query (argmax across classes)
-    pub labels: Vec<i64>,
-    /// Bounding boxes in [x1, y1, x2, y2] pixel coordinates
-    pub boxes: Vec<[f32; 4]>,
-}
-
-/// Detection with optional segmentation mask
-#[derive(Debug, Clone)]
-pub struct DetectionWithMask {
-    /// Base detection info
-    pub detection: Detection,
-    /// Optional binary mask for this detection [H, W] as flattened Vec<bool>
-    pub mask: Option<Vec<bool>>,
-    /// Mask dimensions (height, width)
-    pub mask_dims: Option<(usize, usize)>,
-}
 
 /// Arguments for the predict subcommand
 #[derive(Args, Debug)]
 pub struct PredictArgs {
     /// Input image to process.
     pub image: String,
-
     /// Threshold for the model confidence level.
     #[arg(long, default_value_t = 0.5)]
     pub confidence_threshold: f32,
-
     /// The size for the legend, 0 means no legend.
     #[arg(long, default_value_t = 20)]
     pub legend_size: u32,
-
-    /// Enable debug output to compare with Python.
-    #[arg(long)]
-    pub debug: bool,
 }
 
 /// Color palette for different classes (similar to supervision library's default palette)
@@ -176,7 +149,8 @@ fn draw_detections_with_masks(
         let box_color = get_class_color(det.class_id);
 
         // Draw mask if available
-        if let (Some(mask), Some((mask_h, mask_w))) = (&det_with_mask.mask, det_with_mask.mask_dims)
+        if let (Some(mask), Some((_mask_h, mask_w))) =
+            (&det_with_mask.mask, det_with_mask.mask_dims)
         {
             // Create semi-transparent color for mask (alpha = 100 out of 255)
             let mask_color = Rgba([box_color.0[0], box_color.0[1], box_color.0[2], 100]);
@@ -338,69 +312,7 @@ pub fn predict_image_raw(
     let batch_tensor = preprocess::add_batch_dim(&preprocessed)?;
 
     // Run full model forward pass
-    let (class_logits, bbox_predictions) = model.forward(&batch_tensor)?;
-
-    // Post-process
-    let raw_pred = postprocess_outputs(&class_logits, &bbox_predictions, h_orig, w_orig)?;
-
-    Ok((raw_pred, h_orig, w_orig))
-}
-
-/// Run inference with debug output - prints raw model outputs for comparison with Python.
-pub fn predict_image_raw_debug(
-    model: &RfDetr,
-    image_path: &str,
-    config: &RfDetrConfig,
-    device: &Device,
-) -> anyhow::Result<(RawPrediction, usize, usize)> {
-    // Steps 01-03: Load, normalize, and resize image
-    let (preprocessed, h_orig, w_orig) =
-        preprocess::preprocess_image(image_path, config.resolution, device)?;
-
-    // Add batch dimension: [3, H, W] -> [1, 3, H, W]
-    let batch_tensor = preprocess::add_batch_dim(&preprocessed)?;
-
-    println!("DEBUG: Input tensor shape: {:?}", batch_tensor.dims());
-
-    // Run full model forward pass with debug output
-    let (class_logits, bbox_predictions) = model.forward_debug(&batch_tensor)?;
-
-    println!("DEBUG: class_logits shape: {:?}", class_logits.dims());
-    println!(
-        "DEBUG: bbox_predictions shape: {:?}",
-        bbox_predictions.dims()
-    );
-
-    // Print raw model output stats
-    let class_probs = candle_nn::ops::sigmoid(&class_logits)?;
-    let class_probs_squeezed = class_probs.squeeze(0)?;
-    let max_scores = class_probs_squeezed.max(1)?;
-    let max_scores_vec: Vec<f32> = max_scores.to_vec1()?;
-
-    let mean_score: f32 = max_scores_vec.iter().sum::<f32>() / max_scores_vec.len() as f32;
-    let max_score = max_scores_vec
-        .iter()
-        .cloned()
-        .fold(f32::NEG_INFINITY, f32::max);
-    let min_score = max_scores_vec.iter().cloned().fold(f32::INFINITY, f32::min);
-
-    println!(
-        "DEBUG: Score stats: mean={:.4}, max={:.4}, min={:.4}",
-        mean_score, max_score, min_score
-    );
-    println!("DEBUG: Top 10 scores: {:?}", &max_scores_vec[..10]);
-
-    // Print top 5 boxes (raw cxcywh normalized)
-    let bbox_squeezed = bbox_predictions.squeeze(0)?;
-    let bbox_vec: Vec<f32> = bbox_squeezed.flatten_all()?.to_vec1()?;
-    println!("DEBUG: Top 5 boxes (cxcywh normalized):");
-    for i in 0..5 {
-        let cx = bbox_vec[i * 4];
-        let cy = bbox_vec[i * 4 + 1];
-        let w = bbox_vec[i * 4 + 2];
-        let h = bbox_vec[i * 4 + 3];
-        println!("  {}: [{:.6}, {:.6}, {:.6}, {:.6}]", i, cx, cy, w, h);
-    }
+    let (class_logits, bbox_predictions, _mask_logits) = model.forward(&batch_tensor)?;
 
     // Post-process
     let raw_pred = postprocess_outputs(&class_logits, &bbox_predictions, h_orig, w_orig)?;
@@ -480,15 +392,10 @@ fn predict_image(
     config: &RfDetrConfig,
     device: &Device,
     confidence_threshold: f32,
-    debug: bool,
 ) -> anyhow::Result<Vec<Detection>> {
     println!("Preprocessing image...");
 
-    let (raw_pred, h_orig, w_orig) = if debug {
-        predict_image_raw_debug(model, image_path, config, device)?
-    } else {
-        predict_image_raw(model, image_path, config, device)?
-    };
+    let (raw_pred, h_orig, w_orig) = predict_image_raw(model, image_path, config, device)?;
 
     println!("  Original image size: {}x{}", w_orig, h_orig);
 
@@ -503,6 +410,7 @@ fn predict_image(
     Ok(detections)
 }
 
+// TODO remove this in favor of a single predict function with/without masks flag
 /// Run inference on a single image with segmentation masks.
 fn predict_image_with_masks(
     model: &RfDetr,
@@ -523,7 +431,11 @@ fn predict_image_with_masks(
     println!("  Original image size: {}x{}", w_orig, h_orig);
 
     // Run full model forward pass with masks
-    let (class_logits, bbox_predictions, mask_logits) = model.forward_with_masks(&batch_tensor)?;
+    let (class_logits, bbox_predictions, mask_logits) = model.forward(&batch_tensor)?;
+
+    let Some(mask_logits) = mask_logits else {
+        anyhow::bail!("Model did not produce segmentation masks")
+    };
 
     // Post-process detections
     let raw_pred = postprocess_outputs(&class_logits, &bbox_predictions, h_orig, w_orig)?;
@@ -573,23 +485,9 @@ fn predict_image_with_masks(
 }
 
 /// Load model from path.
-pub fn load_model(
-    model_path: &PathBuf,
-    config: &RfDetrConfig,
-    device: &Device,
-) -> anyhow::Result<RfDetr> {
-    if !model_path.exists() {
-        anyhow::bail!(
-            "Model weights not found at {:?}. Please provide a valid model path with --model, \
-            or ensure the model file exists.\n\
-            You may need to export the PyTorch model to safetensors format first.",
-            model_path
-        );
-    }
-
+pub fn load_model(model_path: &PathBuf, config: &RfDetrConfig, device: &Device) -> Result<RfDetr> {
     let vb = unsafe { VarBuilder::from_mmaped_safetensors(&[model_path], DType::F32, device)? };
-    let model = RfDetr::load(vb, config)?;
-    Ok(model)
+    RfDetr::load(vb, config)
 }
 
 /// Run the predict subcommand
@@ -650,7 +548,6 @@ pub fn run(
             &config,
             device,
             args.confidence_threshold,
-            args.debug,
         )?;
         println!("Inference completed in {:?}", start.elapsed());
 
