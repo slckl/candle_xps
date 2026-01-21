@@ -6,14 +6,13 @@
 //! - Compute COCO evaluation metrics (AP, AR at various IoU thresholds)
 
 use std::collections::HashMap;
-use std::fs::{self, File};
-use std::io::BufReader;
-use std::path::Path;
 
+#[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
 /// Prediction for a single image, matching the Python JSON format.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[derive(Debug, Clone)]
 pub struct ImagePrediction {
     pub image_id: i64,
     pub scores: Vec<f32>,
@@ -23,7 +22,8 @@ pub struct ImagePrediction {
 }
 
 /// COCO annotation format for ground truth.
-#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "serde", derive(Deserialize))]
+#[derive(Debug, Clone)]
 pub struct CocoAnnotation {
     pub id: i64,
     pub image_id: i64,
@@ -35,7 +35,8 @@ pub struct CocoAnnotation {
 }
 
 /// COCO image info.
-#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "serde", derive(Deserialize))]
+#[derive(Debug, Clone)]
 pub struct CocoImage {
     pub id: i64,
     pub width: u32,
@@ -44,7 +45,8 @@ pub struct CocoImage {
 }
 
 /// COCO category info.
-#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "serde", derive(Deserialize))]
+#[derive(Debug, Clone)]
 pub struct CocoCategory {
     pub id: i64,
     pub name: String,
@@ -52,7 +54,8 @@ pub struct CocoCategory {
 }
 
 /// COCO dataset (ground truth).
-#[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(feature = "serde", derive(Deserialize))]
+#[derive(Debug, Clone)]
 pub struct CocoDataset {
     pub images: Vec<CocoImage>,
     pub annotations: Vec<CocoAnnotation>,
@@ -77,7 +80,8 @@ pub struct DetectionBox {
 }
 
 /// COCO evaluation metrics.
-#[derive(Debug, Clone, Default, Serialize)]
+#[cfg_attr(feature = "serde", derive(Serialize))]
+#[derive(Debug, Clone, Default)]
 pub struct CocoMetrics {
     /// AP @ IoU=0.50:0.95
     pub ap: f32,
@@ -123,54 +127,6 @@ impl AreaRange {
             AreaRange::Large => (9216.0, 1e10),
         }
     }
-
-    fn contains(&self, area: f32) -> bool {
-        let (min, max) = self.range();
-        area >= min && area < max
-    }
-}
-
-/// Load predictions from a directory of JSON files.
-pub fn load_predictions(pred_dir: &Path) -> anyhow::Result<HashMap<i64, ImagePrediction>> {
-    let mut predictions = HashMap::new();
-
-    for entry in fs::read_dir(pred_dir)? {
-        let entry = entry?;
-        let path = entry.path();
-
-        if path.extension().and_then(|s| s.to_str()) == Some("json") {
-            let file = File::open(&path)?;
-            let reader = BufReader::new(file);
-            let pred: ImagePrediction = serde_json::from_reader(reader)?;
-            predictions.insert(pred.image_id, pred);
-        }
-    }
-
-    println!("Loaded {} image predictions", predictions.len());
-    Ok(predictions)
-}
-
-/// Save a single prediction to a JSON file.
-pub fn save_prediction(pred: &ImagePrediction, pred_dir: &Path) -> anyhow::Result<()> {
-    fs::create_dir_all(pred_dir)?;
-    let path = pred_dir.join(format!("{}.json", pred.image_id));
-    let file = File::create(&path)?;
-    serde_json::to_writer(file, pred)?;
-    Ok(())
-}
-
-/// Load COCO ground truth annotations.
-pub fn load_coco_annotations(ann_file: &Path) -> anyhow::Result<CocoDataset> {
-    let file = File::open(ann_file)?;
-    let reader = BufReader::new(file);
-    let dataset: CocoDataset = serde_json::from_reader(reader)?;
-    println!(
-        "Loaded COCO annotations: {} images, {} annotations, {} categories",
-        dataset.images.len(),
-        dataset.annotations.len(),
-        dataset.categories.len()
-    );
-    Ok(dataset)
 }
 
 /// Convert box from xyxy format to xywh format.
@@ -497,7 +453,7 @@ impl CocoEvaluator {
                         .iter()
                         .zip(pred.labels.iter())
                         .zip(pred.boxes.iter())
-                        .filter(|((_, &label), _)| label == category_id)
+                        .filter(|&((_, &label), _)| label == category_id)
                         .map(|((&score, _), &bbox)| DetectionBox {
                             bbox: xyxy_to_xywh(bbox),
                             category_id,

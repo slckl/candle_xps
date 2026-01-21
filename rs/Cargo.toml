@@ -4,6 +4,7 @@ members = [
     "candle_conv",
     "candle_rf_detr",
     "candle_yolov8",
+    "cocotools",
 ]
 
 [workspace.dependencies]

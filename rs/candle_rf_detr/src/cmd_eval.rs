@@ -1,12 +1,14 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::fs::{self, File};
+use std::io::BufReader;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use candle_core::Device;
 use clap::Args;
+use cocotools::{CocoDataset, CocoEvaluator, ImagePrediction};
 
 use crate::cmd_predict::{load_model, predict_image_raw};
-use crate::coco_eval::{self, CocoEvaluator, ImagePrediction};
 use crate::config::RfDetrConfig;
 use crate::detection::RawPrediction;
 use crate::model::RfDetr;
@@ -35,12 +37,55 @@ fn raw_to_image_prediction(image_id: i64, raw: RawPrediction) -> ImagePrediction
     }
 }
 
+/// Load predictions from a directory of JSON files.
+pub fn load_predictions(pred_dir: &Path) -> anyhow::Result<HashMap<i64, ImagePrediction>> {
+    let mut predictions = HashMap::new();
+
+    for entry in fs::read_dir(pred_dir)? {
+        let entry = entry?;
+        let path = entry.path();
+
+        if path.extension().and_then(|s| s.to_str()) == Some("json") {
+            let file = File::open(&path)?;
+            let reader = BufReader::new(file);
+            let pred: ImagePrediction = serde_json::from_reader(reader)?;
+            predictions.insert(pred.image_id, pred);
+        }
+    }
+
+    println!("Loaded {} image predictions", predictions.len());
+    Ok(predictions)
+}
+
+/// Save a single prediction to a JSON file.
+pub fn save_prediction(pred: &ImagePrediction, pred_dir: &Path) -> anyhow::Result<()> {
+    fs::create_dir_all(pred_dir)?;
+    let path = pred_dir.join(format!("{}.json", pred.image_id));
+    let file = File::create(&path)?;
+    serde_json::to_writer(file, pred)?;
+    Ok(())
+}
+
+/// Load COCO ground truth annotations.
+pub fn load_coco_annotations(ann_file: &Path) -> anyhow::Result<CocoDataset> {
+    let file = File::open(ann_file)?;
+    let reader = BufReader::new(file);
+    let dataset: CocoDataset = serde_json::from_reader(reader)?;
+    println!(
+        "Loaded COCO annotations: {} images, {} annotations, {} categories",
+        dataset.images.len(),
+        dataset.annotations.len(),
+        dataset.categories.len()
+    );
+    Ok(dataset)
+}
+
 /// Run inference on all COCO validation images.
 fn run_inference(
     model: &RfDetr,
     config: &RfDetrConfig,
     device: &Device,
-    coco_dataset: &coco_eval::CocoDataset,
+    coco_dataset: &CocoDataset,
     coco_path: &PathBuf,
     pred_dir: &PathBuf,
 ) -> anyhow::Result<HashMap<i64, ImagePrediction>> {
@@ -78,7 +123,7 @@ fn run_inference(
         let pred = raw_to_image_prediction(img_info.id, raw_pred);
 
         // Save prediction to disk immediately
-        coco_eval::save_prediction(&pred, pred_dir)?;
+        save_prediction(&pred, pred_dir)?;
 
         predictions.insert(img_info.id, pred);
         processed += 1;
@@ -146,7 +191,7 @@ pub fn run(
 
     // Load COCO ground truth
     println!("\nLoading COCO ground truth annotations...");
-    let coco_dataset = coco_eval::load_coco_annotations(&ann_file)?;
+    let coco_dataset = load_coco_annotations(&ann_file)?;
 
     // Get model name for predictions directory
     // Use "rust_" prefix to distinguish from Python predictions
@@ -166,7 +211,7 @@ pub fn run(
             );
         }
         println!("\nLoading predictions from: {:?}", pred_dir);
-        coco_eval::load_predictions(&pred_dir)?
+        load_predictions(&pred_dir)?
     } else {
         // Load model
         let config = which.config();

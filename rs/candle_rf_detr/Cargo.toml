@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+cocotools = { path = "../cocotools", features = ["serde"] }
+# external
 ab_glyph = { version = "0.2.32" }
 anyhow = "1.0.100"
 candle-core = { git = "https://github.com/slckl/candle.git", features = ["cuda", "cudnn"] }

@@ -7,7 +7,6 @@
 mod cmd_eval;
 mod cmd_predict;
 mod coco_classes;
-mod coco_eval;
 mod config;
 #[cfg(test)]
 mod debug;
