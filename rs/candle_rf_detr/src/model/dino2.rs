@@ -32,10 +32,6 @@ pub struct Dinov2Config {
     pub patch_size: usize,
     /// Number of input channels (typically 3 for RGB)
     pub num_channels: usize,
-    /// Whether to use bias in QKV projections
-    pub qkv_bias: bool,
-    /// Initial value for layer scale parameters
-    pub layerscale_value: f64,
     /// Number of register tokens (0 for RF-DETR small)
     pub num_register_tokens: usize,
     /// Number of windows for windowed attention
@@ -84,8 +80,6 @@ impl Dinov2Config {
             image_size,
             patch_size,
             num_channels: 3,
-            qkv_bias: true,
-            layerscale_value: 1.0,
             num_register_tokens: 0,
             num_windows,
             window_block_indexes,
@@ -125,8 +119,6 @@ impl Dinov2Config {
             image_size,
             patch_size,
             num_channels: 3,
-            qkv_bias: true,
-            layerscale_value: 1.0,
             num_register_tokens: 0, // RF-DETR doesn't use register tokens
             num_windows,
             window_block_indexes,
@@ -150,7 +142,6 @@ impl Dinov2Config {
 /// Patch embeddings using a Conv2d projection
 pub struct PatchEmbeddings {
     projection: Conv2d,
-    patch_size: usize,
 }
 
 impl PatchEmbeddings {
@@ -166,10 +157,7 @@ impl PatchEmbeddings {
             conv_config,
             vb.pp("projection"),
         )?;
-        Ok(Self {
-            projection,
-            patch_size: config.patch_size,
-        })
+        Ok(Self { projection })
     }
 
     pub fn forward(&self, pixel_values: &Tensor) -> Result<Tensor> {
