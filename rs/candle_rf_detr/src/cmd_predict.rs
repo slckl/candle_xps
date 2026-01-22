@@ -6,8 +6,8 @@ use std::time::Instant;
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;
 use clap::Args;
+use image::GenericImageView;
 use image::{DynamicImage, Rgba};
-use imageproc::drawing::Canvas;
 
 use crate::coco_classes;
 use crate::config::RfDetrConfig;
