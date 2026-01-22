@@ -11,7 +11,7 @@ use image::{DynamicImage, Rgba};
 use crate::coco_classes;
 use crate::config::RfDetrConfig;
 use crate::detection::Detection;
-use crate::detection::DetectionWithMask;
+use crate::detection::Mask;
 use crate::detection::RawPrediction;
 use crate::model::RfDetr;
 use crate::preprocess;
@@ -69,73 +69,10 @@ fn get_darker_color(color: image::Rgb<u8>) -> image::Rgb<u8> {
     ])
 }
 
-/// Draw detections on an image (without masks)
+/// Draw detections with segmentation masks on an image
 fn draw_detections(
     img: DynamicImage,
     detections: &[Detection],
-    legend_size: u32,
-) -> Result<DynamicImage> {
-    let mut img = img.to_rgb8();
-    let font = Vec::from(include_bytes!("roboto-mono-stripped.ttf") as &[u8]);
-    let font = ab_glyph::FontRef::try_from_slice(&font).map_err(candle_core::Error::wrap)?;
-
-    for det in detections {
-        let class_name = coco_classes::get_class_name(det.class_id);
-        let [x1, y1, x2, y2] = det.bbox;
-
-        println!(
-            "{}: ({:.1}, {:.1}, {:.1}, {:.1}) conf: {:.2}",
-            class_name, x1, y1, x2, y2, det.score
-        );
-
-        let x1 = x1 as i32;
-        let y1 = y1 as i32;
-        let dx = (x2 - det.bbox[0]).max(0.0) as u32;
-        let dy = (y2 - det.bbox[1]).max(0.0) as u32;
-
-        // Get color based on class
-        let box_color = get_class_color(det.class_id);
-        let label_bg_color = get_darker_color(box_color);
-
-        // Draw bounding box
-        if dx > 0 && dy > 0 {
-            imageproc::drawing::draw_hollow_rect_mut(
-                &mut img,
-                imageproc::rect::Rect::at(x1, y1).of_size(dx, dy),
-                box_color,
-            );
-        }
-
-        // Draw label
-        if legend_size > 0 {
-            imageproc::drawing::draw_filled_rect_mut(
-                &mut img,
-                imageproc::rect::Rect::at(x1, y1).of_size(dx, legend_size),
-                label_bg_color,
-            );
-            let legend = format!("{} {:.0}%", class_name, 100.0 * det.score);
-            imageproc::drawing::draw_text_mut(
-                &mut img,
-                image::Rgb([255, 255, 255]),
-                x1,
-                y1,
-                ab_glyph::PxScale {
-                    x: legend_size as f32 - 1.0,
-                    y: legend_size as f32 - 1.0,
-                },
-                &font,
-                &legend,
-            );
-        }
-    }
-
-    Ok(DynamicImage::ImageRgb8(img))
-}
-
-/// Draw detections with segmentation masks on an image
-fn draw_detections_with_masks(
-    img: DynamicImage,
-    detections: &[DetectionWithMask],
     legend_size: u32,
 ) -> Result<DynamicImage> {
     let (img_width, img_height) = (img.width() as usize, img.height() as usize);
@@ -144,13 +81,14 @@ fn draw_detections_with_masks(
     let font = ab_glyph::FontRef::try_from_slice(&font).map_err(candle_core::Error::wrap)?;
 
     // First pass: draw all masks with transparency
-    for det_with_mask in detections {
-        let det = &det_with_mask.detection;
+    for det in detections {
         let box_color = get_class_color(det.class_id);
 
         // Draw mask if available
-        if let (Some(mask), Some((_mask_h, mask_w))) =
-            (&det_with_mask.mask, det_with_mask.mask_dims)
+        if let Some(Mask {
+            mask,
+            mask_dims: (_mask_h, mask_w),
+        }) = &det.mask
         {
             // Create semi-transparent color for mask (alpha = 100 out of 255)
             let mask_color = Rgba([box_color.0[0], box_color.0[1], box_color.0[2], 100]);
@@ -184,8 +122,7 @@ fn draw_detections_with_masks(
     let mut img_rgb = DynamicImage::ImageRgba8(img).to_rgb8();
 
     // Second pass: draw bounding boxes and labels on top
-    for det_with_mask in detections {
-        let det = &det_with_mask.detection;
+    for det in detections {
         let class_name = coco_classes::get_class_name(det.class_id);
         let [x1, y1, x2, y2] = det.bbox;
 
@@ -340,6 +277,7 @@ pub fn filter_detections(raw: &RawPrediction, confidence_threshold: f32) -> Vec<
             bbox: raw.boxes[i],
             score,
             class_id,
+            mask: None,
         });
     }
 
@@ -375,6 +313,7 @@ fn filter_detections_with_indices(
                 bbox: raw.boxes[i],
                 score,
                 class_id,
+                mask: None,
             },
         ));
     }
@@ -418,7 +357,7 @@ fn predict_image_with_masks(
     config: &RfDetrConfig,
     device: &Device,
     confidence_threshold: f32,
-) -> anyhow::Result<Vec<DetectionWithMask>> {
+) -> anyhow::Result<Vec<Detection>> {
     println!("Preprocessing image...");
 
     // Steps 01-03: Load, normalize, and resize image
@@ -474,10 +413,14 @@ fn predict_image_with_masks(
         // (threshold on raw logits, not sigmoid)
         let binary_mask: Vec<bool> = mask_flat.iter().map(|&v| v > 0.0).collect();
 
-        detections_with_masks.push(DetectionWithMask {
-            detection,
-            mask: Some(binary_mask),
-            mask_dims: Some((h_orig, w_orig)),
+        detections_with_masks.push(Detection {
+            bbox: detection.bbox,
+            score: detection.score,
+            class_id: detection.class_id,
+            mask: Some(Mask {
+                mask: binary_mask,
+                mask_dims: (h_orig, w_orig),
+            }),
         });
     }
 
@@ -518,6 +461,7 @@ pub fn run(
     // Load original image for annotation
     let img = image::ImageReader::open(&args.image)?.decode()?;
 
+    // TODO handle segmentation and non-segmentation models in a unified way?
     let annotated = if config.segmentation_head {
         // Run inference with masks for segmentation model
         let start = Instant::now();
@@ -538,7 +482,7 @@ pub fn run(
         println!("Annotating {} segmentation masks", detections.len());
 
         // Draw detections with masks
-        draw_detections_with_masks(img, &detections, args.legend_size)?
+        draw_detections(img, &detections, args.legend_size)?
     } else {
         // Run inference without masks for detection-only model
         let start = Instant::now();

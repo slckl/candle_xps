@@ -11,6 +11,15 @@ pub struct RawPrediction {
     pub boxes: Vec<[f32; 4]>,
 }
 
+/// Optional segmentation mask for a detection.
+#[derive(Debug, Clone)]
+pub struct Mask {
+    /// Binary mask for this detection [H, W] as flattened Vec<bool>
+    pub mask: Vec<bool>,
+    /// Mask dimensions (height, width)
+    pub mask_dims: (usize, usize),
+}
+
 /// A single object detection result.
 ///
 /// Contains the bounding box coordinates, confidence score, and class information
@@ -24,15 +33,6 @@ pub struct Detection {
     pub score: f32,
     /// Class ID (0-90 for COCO, where 0 is background)
     pub class_id: usize,
-}
-
-/// Detection with optional segmentation mask
-#[derive(Debug, Clone)]
-pub struct DetectionWithMask {
-    /// Base detection info
-    pub detection: Detection,
-    /// Optional binary mask for this detection [H, W] as flattened Vec<bool>
-    pub mask: Option<Vec<bool>>,
-    /// Mask dimensions (height, width)
-    pub mask_dims: Option<(usize, usize)>,
+    /// Optional segmentation mask for this detection.
+    pub mask: Option<Mask>,
 }
