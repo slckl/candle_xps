@@ -117,7 +117,8 @@ fn run_inference(
 
         // Run inference
         let image_path_str = image_path.to_string_lossy().to_string();
-        let (raw_pred, _h, _w) = predict_image_raw(model, &image_path_str, config, device)?;
+        let image = image::open(&image_path_str)?;
+        let (raw_pred, _mask_logits) = predict_image_raw(model, image, config, device)?;
 
         // Convert to ImagePrediction
         let pred = raw_to_image_prediction(img_info.id, raw_pred);

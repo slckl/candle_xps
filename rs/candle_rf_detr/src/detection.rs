@@ -1,4 +1,3 @@
-// TODO include mask stuff here as well?
 /// Raw prediction output before thresholding.
 /// Contains all queries with their scores, labels, and boxes.
 #[derive(Debug, Clone)]

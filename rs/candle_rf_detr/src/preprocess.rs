@@ -14,12 +14,6 @@ pub const IMAGENET_MEAN: [f32; 3] = [0.485, 0.456, 0.406];
 /// ImageNet normalization std values (RGB order)
 pub const IMAGENET_STD: [f32; 3] = [0.229, 0.224, 0.225];
 
-/// Load an image from disk and return it as a DynamicImage
-pub fn load_image(path: &str) -> anyhow::Result<DynamicImage> {
-    let img = image::open(path)?;
-    Ok(img)
-}
-
 /// Convert a DynamicImage to a tensor in CHW format with values in [0, 1]
 ///
 /// This corresponds to PyTorch's `torchvision.transforms.functional.to_tensor`
@@ -125,17 +119,9 @@ pub fn resize(tensor: &Tensor, target_size: (usize, usize)) -> Result<Tensor> {
 /// # Returns
 /// Tuple of (preprocessed_tensor, original_height, original_width)
 /// - preprocessed_tensor has shape [3, resolution, resolution]
-pub fn preprocess_image(
-    image_path: &str,
-    resolution: usize,
-    device: &Device,
-) -> anyhow::Result<(Tensor, usize, usize)> {
-    // Step 1: Load image
-    let img = load_image(image_path)?;
-
+pub fn preprocess_image(img: DynamicImage, resolution: usize, device: &Device) -> Result<Tensor> {
     // Step 2: Convert to tensor [3, H, W] with values in [0, 1]
     let tensor = image_to_tensor(&img, device)?;
-    let (_, h_orig, w_orig) = tensor.dims3()?;
 
     // Step 3: Normalize with ImageNet mean/std
     let normalized = normalize(&tensor)?;
@@ -143,18 +129,7 @@ pub fn preprocess_image(
     // Step 4: Resize to model resolution
     let resized = resize(&normalized, (resolution, resolution))?;
 
-    Ok((resized, h_orig, w_orig))
-}
-
-/// Add batch dimension to a preprocessed image tensor
-///
-/// # Arguments
-/// * `tensor` - Tensor of shape [3, H, W]
-///
-/// # Returns
-/// Tensor of shape [1, 3, H, W]
-pub fn add_batch_dim(tensor: &Tensor) -> Result<Tensor> {
-    tensor.unsqueeze(0)
+    Ok(resized)
 }
 
 #[cfg(test)]
@@ -216,15 +191,6 @@ mod tests {
         let resized = resize(&input, (100, 100)).unwrap();
 
         assert_eq!(resized.dims(), &[3, 100, 100]);
-    }
-
-    #[test]
-    fn test_add_batch_dim() {
-        let device = Device::Cpu;
-        let input = Tensor::zeros((3, 384, 384), DType::F32, &device).unwrap();
-        let batched = add_batch_dim(&input).unwrap();
-
-        assert_eq!(batched.dims(), &[1, 3, 384, 384]);
     }
 
     #[test]
@@ -412,7 +378,7 @@ mod tests {
 
         // Step 1: Load image and convert to tensor
         println!("\nStep 01 - Raw image tensor:");
-        let img = load_image(IMAGE_PATH).expect("Failed to load image");
+        let img = image::open(IMAGE_PATH).expect("Failed to load image");
         let tensor = image_to_tensor(&img, &device).expect("Failed to convert to tensor");
         let our_stats = TensorStats::from_tensor(&tensor).unwrap();
         println!(

@@ -7,6 +7,7 @@ use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;
 use clap::Args;
 use image::{DynamicImage, Rgba};
+use imageproc::drawing::Canvas;
 
 use crate::coco_classes;
 use crate::config::RfDetrConfig;
@@ -17,7 +18,6 @@ use crate::model::RfDetr;
 use crate::preprocess;
 use crate::Which;
 
-/// Arguments for the predict subcommand
 #[derive(Args, Debug)]
 pub struct PredictArgs {
     /// Input image to process.
@@ -180,8 +180,8 @@ fn draw_detections(
 pub fn postprocess_outputs(
     class_logits: &Tensor,
     bbox_predictions: &Tensor,
-    h_orig: usize,
-    w_orig: usize,
+    h_orig: u32,
+    w_orig: u32,
 ) -> anyhow::Result<RawPrediction> {
     // Apply sigmoid to class logits to get probabilities
     let class_probs = candle_nn::ops::sigmoid(class_logits)?;
@@ -234,65 +234,33 @@ pub fn postprocess_outputs(
 }
 
 /// Run inference on a single image and return raw predictions (all queries).
-/// This is the core inference function used by both predict and eval.
+///
+/// Output includes [RawPrediction]s and optional mask logits tensor.
 pub fn predict_image_raw(
     model: &RfDetr,
-    image_path: &str,
+    image: DynamicImage,
     config: &RfDetrConfig,
     device: &Device,
-) -> anyhow::Result<(RawPrediction, usize, usize)> {
+) -> anyhow::Result<(RawPrediction, Option<Tensor>)> {
     // Steps 01-03: Load, normalize, and resize image
-    let (preprocessed, h_orig, w_orig) =
-        preprocess::preprocess_image(image_path, config.resolution, device)?;
+    let (w_orig, h_orig) = image.dimensions();
+    let preprocessed = preprocess::preprocess_image(image, config.resolution, device)?;
 
     // Add batch dimension: [3, H, W] -> [1, 3, H, W]
-    let batch_tensor = preprocess::add_batch_dim(&preprocessed)?;
+    let batch_tensor = preprocessed.unsqueeze(0)?;
 
     // Run full model forward pass
-    let (class_logits, bbox_predictions, _mask_logits) = model.forward(&batch_tensor)?;
+    let (class_logits, bbox_predictions, mask_logits) = model.forward(&batch_tensor)?;
 
     // Post-process
     let raw_pred = postprocess_outputs(&class_logits, &bbox_predictions, h_orig, w_orig)?;
 
-    Ok((raw_pred, h_orig, w_orig))
-}
-
-/// Filter raw predictions by confidence threshold and skip background class.
-pub fn filter_detections(raw: &RawPrediction, confidence_threshold: f32) -> Vec<Detection> {
-    let mut detections = Vec::new();
-
-    for i in 0..raw.scores.len() {
-        let score = raw.scores[i];
-        if score < confidence_threshold {
-            continue;
-        }
-
-        let class_id = raw.labels[i] as usize;
-        // Skip background class (class 0 in COCO is typically background)
-        if class_id == 0 {
-            continue;
-        }
-
-        detections.push(Detection {
-            bbox: raw.boxes[i],
-            score,
-            class_id,
-            mask: None,
-        });
-    }
-
-    // Sort by score descending
-    detections.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
-
-    detections
+    Ok((raw_pred, mask_logits))
 }
 
 /// Filter raw predictions with masks by confidence threshold and skip background class.
 /// Returns indices of kept detections for mask extraction.
-fn filter_detections_with_indices(
-    raw: &RawPrediction,
-    confidence_threshold: f32,
-) -> Vec<(usize, Detection)> {
+fn filter_detections(raw: &RawPrediction, confidence_threshold: f32) -> Vec<(usize, Detection)> {
     let mut detections = Vec::new();
 
     for i in 0..raw.scores.len() {
@@ -334,11 +302,16 @@ fn predict_image(
 ) -> anyhow::Result<Vec<Detection>> {
     println!("Preprocessing image...");
 
-    let (raw_pred, h_orig, w_orig) = predict_image_raw(model, image_path, config, device)?;
-
+    let image = image::open(image_path)?;
+    let (w_orig, h_orig) = image.dimensions();
     println!("  Original image size: {}x{}", w_orig, h_orig);
 
-    let detections = filter_detections(&raw_pred, confidence_threshold);
+    let (raw_pred, _mask_logits) = predict_image_raw(model, image, config, device)?;
+
+    let detections: Vec<Detection> = filter_detections(&raw_pred, confidence_threshold)
+        .into_iter()
+        .map(|(_, det)| det)
+        .collect();
 
     println!(
         "  Found {} detections above threshold {}",
@@ -361,26 +334,17 @@ fn predict_image_with_masks(
     println!("Preprocessing image...");
 
     // Steps 01-03: Load, normalize, and resize image
-    let (preprocessed, h_orig, w_orig) =
-        preprocess::preprocess_image(image_path, config.resolution, device)?;
+    let image = image::open(image_path)?;
+    let (w_orig, h_orig) = image.dimensions();
 
-    // Add batch dimension: [3, H, W] -> [1, 3, H, W]
-    let batch_tensor = preprocess::add_batch_dim(&preprocessed)?;
-
-    println!("  Original image size: {}x{}", w_orig, h_orig);
-
-    // Run full model forward pass with masks
-    let (class_logits, bbox_predictions, mask_logits) = model.forward(&batch_tensor)?;
+    let (raw_pred, mask_logits) = predict_image_raw(model, image, config, device)?;
 
     let Some(mask_logits) = mask_logits else {
         anyhow::bail!("Model did not produce segmentation masks")
     };
 
-    // Post-process detections
-    let raw_pred = postprocess_outputs(&class_logits, &bbox_predictions, h_orig, w_orig)?;
-
     // Filter detections and keep track of indices for mask extraction
-    let filtered = filter_detections_with_indices(&raw_pred, confidence_threshold);
+    let filtered = filter_detections(&raw_pred, confidence_threshold);
 
     println!(
         "  Found {} detections above threshold {}",
@@ -403,7 +367,7 @@ fn predict_image_with_masks(
 
         // Resize mask to original image size using bilinear interpolation
         // This matches Python's F.interpolate(masks, size=(h, w), mode='bilinear', align_corners=False)
-        let mask_resized = mask_4d.upsample_bilinear2d(h_orig, w_orig, false)?;
+        let mask_resized = mask_4d.upsample_bilinear2d(h_orig as usize, w_orig as usize, false)?;
 
         // Squeeze back to [h_orig, w_orig] and convert to binary mask
         let mask_flat: Vec<f32> = mask_resized.flatten_all()?.to_vec1()?;
@@ -419,7 +383,7 @@ fn predict_image_with_masks(
             class_id: detection.class_id,
             mask: Some(Mask {
                 mask: binary_mask,
-                mask_dims: (h_orig, w_orig),
+                mask_dims: (h_orig as usize, w_orig as usize),
             }),
         });
     }
