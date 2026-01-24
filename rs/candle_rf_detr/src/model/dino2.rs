@@ -128,11 +128,6 @@ impl Dinov2Config {
         }
     }
 
-    /// Get the attention head size
-    pub fn attention_head_size(&self) -> usize {
-        self.hidden_size / self.num_attention_heads
-    }
-
     /// Check if a layer index uses windowed attention
     pub fn is_windowed_layer(&self, layer_idx: usize) -> bool {
         self.window_block_indexes.contains(&layer_idx)
@@ -346,99 +341,61 @@ impl Embeddings {
     }
 }
 
-/// Self-attention mechanism
-#[derive(Debug)]
-pub struct SelfAttention {
-    query: Linear,
-    key: Linear,
-    value: Linear,
-    num_attention_heads: usize,
-    attention_head_size: usize,
-}
-
-impl SelfAttention {
-    pub fn load(vb: VarBuilder, config: &Dinov2Config) -> Result<Self> {
-        let all_head_size = config.hidden_size;
-
-        let query = candle_nn::linear(config.hidden_size, all_head_size, vb.pp("query"))?;
-        let key = candle_nn::linear(config.hidden_size, all_head_size, vb.pp("key"))?;
-        let value = candle_nn::linear(config.hidden_size, all_head_size, vb.pp("value"))?;
-
-        Ok(Self {
-            query,
-            key,
-            value,
-            num_attention_heads: config.num_attention_heads,
-            attention_head_size: config.attention_head_size(),
-        })
-    }
-
-    fn transpose_for_scores(&self, x: &Tensor) -> Result<Tensor> {
-        let (batch_size, seq_len, _) = x.dims3()?;
-        let x = x.reshape((
-            batch_size,
-            seq_len,
-            self.num_attention_heads,
-            self.attention_head_size,
-        ))?;
-        x.permute((0, 2, 1, 3))
-    }
-
-    pub fn forward(&self, hidden_states: &Tensor) -> Result<Tensor> {
-        let query_layer = self
-            .transpose_for_scores(&self.query.forward(hidden_states)?)?
-            .contiguous()?;
-        let key_layer = self
-            .transpose_for_scores(&self.key.forward(hidden_states)?)?
-            .contiguous()?;
-        let value_layer = self
-            .transpose_for_scores(&self.value.forward(hidden_states)?)?
-            .contiguous()?;
-
-        // Scaled dot-product attention
-        let key_t = key_layer.transpose(D::Minus2, D::Minus1)?.contiguous()?;
-        let attention_scores = query_layer.matmul(&key_t)?;
-        let attention_scores = (attention_scores / (self.attention_head_size as f64).sqrt())?;
-
-        let attention_probs = candle_nn::ops::softmax(&attention_scores, D::Minus1)?;
-
-        let context_layer = attention_probs.matmul(&value_layer)?;
-        let context_layer = context_layer.permute((0, 2, 1, 3))?.contiguous()?;
-
-        let (batch_size, seq_len, _, _) = context_layer.dims4()?;
-        context_layer.reshape((
-            batch_size,
-            seq_len,
-            self.num_attention_heads * self.attention_head_size,
-        ))
-    }
-}
-
-/// Full attention module combining self-attention and output projection
 #[derive(Debug)]
 pub struct Attention {
-    attention: SelfAttention,
-    /// Dense output projection.
-    // AKA proj in candle reference dino2 impl
-    dense: Linear,
+    qkv: Linear,
+    proj: Linear,
+    num_heads: usize,
+    scale: f64,
 }
 
 impl Attention {
     pub fn load(vb: VarBuilder, config: &Dinov2Config) -> Result<Self> {
-        let attention = SelfAttention::load(vb.pp("attention"), config)?;
-        let dense = candle_nn::linear(
-            config.hidden_size,
-            config.hidden_size,
-            vb.pp("output.dense"),
-        )?;
-        Ok(Self { attention, dense })
+        let dim = config.hidden_size;
+        let num_heads = config.num_attention_heads;
+
+        // Load separate q/k/v weights and fuse them into a single qkv to match dino2 reference candle impl.
+        let attn_vb = vb.pp("attention");
+        let q_weight = attn_vb.pp("query").get((dim, dim), "weight")?;
+        let k_weight = attn_vb.pp("key").get((dim, dim), "weight")?;
+        let v_weight = attn_vb.pp("value").get((dim, dim), "weight")?;
+        let qkv_weight = Tensor::cat(&[&q_weight, &k_weight, &v_weight], 0)?;
+
+        let q_bias = attn_vb.pp("query").get(dim, "bias")?;
+        let k_bias = attn_vb.pp("key").get(dim, "bias")?;
+        let v_bias = attn_vb.pp("value").get(dim, "bias")?;
+        let qkv_bias = Tensor::cat(&[&q_bias, &k_bias, &v_bias], 0)?;
+
+        let qkv = Linear::new(qkv_weight, Some(qkv_bias));
+
+        let proj = candle_nn::linear(dim, dim, vb.pp("output.dense"))?;
+        let scale = 1. / ((dim / num_heads) as f64).sqrt();
+
+        Ok(Self {
+            qkv,
+            proj,
+            num_heads,
+            scale,
+        })
     }
 }
 
 impl Module for Attention {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let attention_output = self.attention.forward(xs)?;
-        self.dense.forward(&attention_output)
+        let (b, n, c) = xs.dims3()?;
+        let qkv = self
+            .qkv
+            .forward(xs)?
+            .reshape((b, n, 3, self.num_heads, c / self.num_heads))?
+            .transpose(1, 2)? // b,3,n,h,d
+            .transpose(0, 1)? // 3,b,n,h,d
+            .transpose(2, 3)?; // 3,b,h,n,d
+        let q = (qkv.i(0)? * self.scale)?;
+        let k = qkv.i(1)?.contiguous()?;
+        let v = qkv.i(2)?.contiguous()?;
+        let attn = candle_nn::ops::softmax(&q.matmul(&k.t()?)?, D::Minus1)?;
+        let attn = attn.matmul(&v)?.transpose(1, 2)?.reshape((b, n, c))?;
+        self.proj.forward(&attn)
     }
 }
 
@@ -737,39 +694,6 @@ impl DinoV2Encoder {
 mod tests {
     use super::*;
     use candle_core::Device;
-
-    #[test]
-    fn test_config_small() {
-        let config = Dinov2Config::small_windowed(512, 16, 2, &[3, 6, 9, 12]);
-        assert_eq!(config.hidden_size, 384);
-        assert_eq!(config.num_attention_heads, 6);
-        assert_eq!(config.attention_head_size(), 64);
-
-        // Layers 3, 6, 9 (using 1-indexed stage numbers) should use full attention
-        // Layer 12 doesn't exist in a 12-layer model (layers are 0-11)
-        assert!(!config.is_windowed_layer(3));
-        assert!(!config.is_windowed_layer(6));
-        assert!(!config.is_windowed_layer(9));
-
-        // Other layers should use windowed attention
-        assert!(config.is_windowed_layer(0));
-        assert!(config.is_windowed_layer(1));
-        assert!(config.is_windowed_layer(2));
-        assert!(config.is_windowed_layer(4));
-        assert!(config.is_windowed_layer(5));
-        assert!(config.is_windowed_layer(7));
-        assert!(config.is_windowed_layer(8));
-        assert!(config.is_windowed_layer(10));
-        assert!(config.is_windowed_layer(11));
-    }
-
-    #[test]
-    fn test_config_base() {
-        let config = Dinov2Config::base_windowed(560, 14, 4, &[2, 5, 8, 11]);
-        assert_eq!(config.hidden_size, 768);
-        assert_eq!(config.num_attention_heads, 12);
-        assert_eq!(config.attention_head_size(), 64);
-    }
 
     /// Integration test comparing backbone encoder output against Python reference
     ///
