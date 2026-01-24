@@ -414,40 +414,31 @@ impl SelfAttention {
     }
 }
 
-/// Output projection for self-attention
-#[derive(Debug)]
-pub struct SelfOutput {
-    dense: Linear,
-}
-
-impl SelfOutput {
-    pub fn load(vb: VarBuilder, config: &Dinov2Config) -> Result<Self> {
-        let dense = candle_nn::linear(config.hidden_size, config.hidden_size, vb.pp("dense"))?;
-        Ok(Self { dense })
-    }
-
-    pub fn forward(&self, hidden_states: &Tensor) -> Result<Tensor> {
-        self.dense.forward(hidden_states)
-    }
-}
-
 /// Full attention module combining self-attention and output projection
 #[derive(Debug)]
 pub struct Attention {
     attention: SelfAttention,
-    output: SelfOutput,
+    /// Dense output projection.
+    // AKA proj in candle reference dino2 impl
+    dense: Linear,
 }
 
 impl Attention {
     pub fn load(vb: VarBuilder, config: &Dinov2Config) -> Result<Self> {
         let attention = SelfAttention::load(vb.pp("attention"), config)?;
-        let output = SelfOutput::load(vb.pp("output"), config)?;
-        Ok(Self { attention, output })
+        let dense = candle_nn::linear(
+            config.hidden_size,
+            config.hidden_size,
+            vb.pp("output.dense"),
+        )?;
+        Ok(Self { attention, dense })
     }
+}
 
-    pub fn forward(&self, hidden_states: &Tensor) -> Result<Tensor> {
-        let attention_output = self.attention.forward(hidden_states)?;
-        self.output.forward(&attention_output)
+impl Module for Attention {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let attention_output = self.attention.forward(xs)?;
+        self.dense.forward(&attention_output)
     }
 }
 
