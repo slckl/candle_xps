@@ -347,6 +347,7 @@ impl Embeddings {
 }
 
 /// Self-attention mechanism
+#[derive(Debug)]
 pub struct SelfAttention {
     query: Linear,
     key: Linear,
@@ -414,6 +415,7 @@ impl SelfAttention {
 }
 
 /// Output projection for self-attention
+#[derive(Debug)]
 pub struct SelfOutput {
     dense: Linear,
 }
@@ -430,6 +432,7 @@ impl SelfOutput {
 }
 
 /// Full attention module combining self-attention and output projection
+#[derive(Debug)]
 pub struct Attention {
     attention: SelfAttention,
     output: SelfOutput,
@@ -449,6 +452,7 @@ impl Attention {
 }
 
 /// Layer scale: learnable per-channel scaling
+#[derive(Debug)]
 pub struct LayerScale {
     lambda: Tensor,
 }
@@ -458,13 +462,15 @@ impl LayerScale {
         let lambda = vb.get(config.hidden_size, "lambda1")?;
         Ok(Self { lambda })
     }
+}
 
-    pub fn forward(&self, hidden_states: &Tensor) -> Result<Tensor> {
-        hidden_states.broadcast_mul(&self.lambda)
+impl Module for LayerScale {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        xs.broadcast_mul(&self.lambda)
     }
 }
 
-/// MLP (feed-forward network)
+#[derive(Debug)]
 pub struct Mlp {
     fc1: Linear,
     fc2: Linear,
@@ -477,22 +483,26 @@ impl Mlp {
         let fc2 = candle_nn::linear(hidden_features, config.hidden_size, vb.pp("fc2"))?;
         Ok(Self { fc1, fc2 })
     }
+}
 
-    pub fn forward(&self, hidden_states: &Tensor) -> Result<Tensor> {
-        let hidden = self.fc1.forward(hidden_states)?;
-        let hidden = hidden.gelu_erf()?;
-        self.fc2.forward(&hidden)
+impl Module for Mlp {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let xs = self.fc1.forward(xs)?;
+        // TODO do we need gelu_erf(), won't just gelu() be enough?
+        let xs = xs.gelu_erf()?;
+        self.fc2.forward(&xs)
     }
 }
 
 /// Single transformer layer/block
+#[derive(Debug)]
 pub struct Layer {
     norm1: LayerNorm,
-    attention: Attention,
-    layer_scale1: LayerScale,
+    attn: Attention,
+    ls1: LayerScale,
     norm2: LayerNorm,
     mlp: Mlp,
-    layer_scale2: LayerScale,
+    ls2: LayerScale,
     num_windows: usize,
 }
 
@@ -509,11 +519,11 @@ impl Layer {
 
         Ok(Self {
             norm1,
-            attention,
-            layer_scale1,
+            attn: attention,
+            ls1: layer_scale1,
             norm2,
             mlp,
-            layer_scale2,
+            ls2: layer_scale2,
             num_windows: config.num_windows,
         })
     }
@@ -537,7 +547,7 @@ impl Layer {
 
         // Self-attention with pre-norm
         let normed = self.norm1.forward(&hidden_states)?;
-        let mut attention_output = self.attention.forward(&normed)?;
+        let mut attention_output = self.attn.forward(&normed)?;
 
         // For full attention layers, split back to windows after attention
         // Use the merged dimensions (from hidden_states after merge) for the split
@@ -553,14 +563,14 @@ impl Layer {
         }
 
         // Layer scale and residual
-        let attention_output = self.layer_scale1.forward(&attention_output)?;
+        let attention_output = self.ls1.forward(&attention_output)?;
         let hidden_states = (shortcut + attention_output)?;
 
         // MLP with pre-norm
         let shortcut = hidden_states.clone();
         let normed = self.norm2.forward(&hidden_states)?;
         let mlp_output = self.mlp.forward(&normed)?;
-        let mlp_output = self.layer_scale2.forward(&mlp_output)?;
+        let mlp_output = self.ls2.forward(&mlp_output)?;
 
         shortcut + mlp_output
     }
