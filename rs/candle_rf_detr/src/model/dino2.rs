@@ -11,7 +11,7 @@
 //! - Optional register tokens (not used in RF-DETR small)
 
 use candle_core::{DType, IndexOp, Result, Tensor, D};
-use candle_nn::{Conv2d, Conv2dConfig, LayerNorm, Linear, Module, VarBuilder};
+use candle_nn::{layer_norm, Conv2d, Conv2dConfig, LayerNorm, Linear, Module, VarBuilder};
 
 /// Configuration for the DINOv2 backbone
 #[derive(Debug, Clone)]
@@ -406,8 +406,8 @@ pub struct LayerScale {
 }
 
 impl LayerScale {
-    pub fn load(vb: VarBuilder, config: &Dinov2Config) -> Result<Self> {
-        let lambda = vb.get(config.hidden_size, "lambda1")?;
+    pub fn load(vb: VarBuilder, dim: usize) -> Result<Self> {
+        let lambda = vb.get(dim, "lambda1")?;
         Ok(Self { lambda })
     }
 }
@@ -456,14 +456,12 @@ pub struct Layer {
 
 impl Layer {
     pub fn load(vb: VarBuilder, config: &Dinov2Config) -> Result<Self> {
-        let norm1 =
-            candle_nn::layer_norm(config.hidden_size, config.layer_norm_eps, vb.pp("norm1"))?;
+        let norm1 = layer_norm(config.hidden_size, config.layer_norm_eps, vb.pp("norm1"))?;
         let attention = Attention::load(vb.pp("attention"), config)?;
-        let layer_scale1 = LayerScale::load(vb.pp("layer_scale1"), config)?;
-        let norm2 =
-            candle_nn::layer_norm(config.hidden_size, config.layer_norm_eps, vb.pp("norm2"))?;
+        let layer_scale1 = LayerScale::load(vb.pp("layer_scale1"), config.hidden_size)?;
+        let norm2 = layer_norm(config.hidden_size, config.layer_norm_eps, vb.pp("norm2"))?;
         let mlp = Mlp::load(vb.pp("mlp"), config)?;
-        let layer_scale2 = LayerScale::load(vb.pp("layer_scale2"), config)?;
+        let layer_scale2 = LayerScale::load(vb.pp("layer_scale2"), config.hidden_size)?;
 
         Ok(Self {
             norm1,
