@@ -9,7 +9,7 @@ use candle_core::{Device, Module, Result, Tensor};
 use candle_nn::{linear, Linear, VarBuilder};
 
 use crate::config::RfDetrConfig;
-use crate::model::dino2::{DinoV2Encoder, Dinov2Config};
+use crate::model::dino2::{Dinov2Backbone, Dinov2Config};
 use crate::model::pos_enc::PositionEmbeddingSine;
 use crate::model::projector::{MultiScaleProjector, ProjectorConfig};
 use crate::model::query_embed::QueryEmbeddings;
@@ -24,7 +24,7 @@ pub struct RfDetr {
     /// Model configuration
     pub config: RfDetrConfig,
     /// Backbone encoder (DINOv2)
-    backbone_encoder: DinoV2Encoder,
+    backbone_encoder: Dinov2Backbone,
     /// Feature projector (multi-scale)
     projector: MultiScaleProjector,
     /// Position encoding generator
@@ -62,7 +62,7 @@ impl RfDetr {
         // Load backbone encoder
         // Weight path: backbone.0.encoder.encoder.*
         let backbone_encoder =
-            DinoV2Encoder::load(vb.pp("backbone.0.encoder.encoder"), &dino_config)?;
+            Dinov2Backbone::load(vb.pp("backbone.0.encoder.encoder"), &dino_config)?;
 
         // TODO use values from config, instead of hardcoded...
         // Load projector

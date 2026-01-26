@@ -40,8 +40,6 @@ pub struct Dinov2Config {
     pub window_block_indexes: Vec<usize>,
     /// Output feature stage names (e.g., ["stage3", "stage6", "stage9", "stage12"])
     pub out_features: Vec<String>,
-    /// Whether to apply layer norm to output features
-    pub apply_layernorm: bool,
     /// Whether to reshape hidden states to 4D (B, C, H, W)
     pub reshape_hidden_states: bool,
 }
@@ -84,7 +82,6 @@ impl Dinov2Config {
             num_windows,
             window_block_indexes,
             out_features,
-            apply_layernorm: true,
             reshape_hidden_states: true,
         }
     }
@@ -123,7 +120,6 @@ impl Dinov2Config {
             num_windows,
             window_block_indexes,
             out_features,
-            apply_layernorm: true,
             reshape_hidden_states: true,
         }
     }
@@ -154,8 +150,10 @@ impl PatchEmbeddings {
         )?;
         Ok(Self { projection })
     }
+}
 
-    pub fn forward(&self, pixel_values: &Tensor) -> Result<Tensor> {
+impl Module for PatchEmbeddings {
+    fn forward(&self, pixel_values: &Tensor) -> Result<Tensor> {
         // pixel_values: [batch_size, num_channels, height, width]
         // output: [batch_size, num_patches, hidden_size]
         let embeddings = self.projection.forward(pixel_values)?;
@@ -607,11 +605,7 @@ impl Dinov2Backbone {
             }
 
             let mut hidden_state = hidden_state.clone();
-
-            // Apply layer norm if configured
-            if self.config.apply_layernorm {
-                hidden_state = self.layernorm.forward(&hidden_state)?;
-            }
+            hidden_state = self.layernorm.forward(&hidden_state)?;
 
             if self.config.reshape_hidden_states {
                 // Remove cls token (and register tokens if present)
@@ -666,25 +660,6 @@ impl Dinov2Backbone {
         }
 
         Ok(feature_maps)
-    }
-}
-
-/// Wrapper for the full DINOv2 encoder used in RF-DETR backbone
-/// This matches the structure: backbone.0.encoder in the Python model
-pub struct DinoV2Encoder {
-    pub encoder: Dinov2Backbone,
-}
-
-impl DinoV2Encoder {
-    /// Load from VarBuilder with prefix "backbone.0.encoder.encoder"
-    pub fn load(vb: VarBuilder, config: &Dinov2Config) -> Result<Self> {
-        let encoder = Dinov2Backbone::load(vb, config)?;
-        Ok(Self { encoder })
-    }
-
-    /// Forward pass returning feature maps
-    pub fn forward(&self, pixel_values: &Tensor) -> Result<Vec<Tensor>> {
-        self.encoder.forward(pixel_values)
     }
 }
 
@@ -794,7 +769,7 @@ mod tests {
         };
 
         let config = Dinov2Config::small_windowed(RESOLUTION, 16, 2, &[3, 6, 9, 12]);
-        let encoder = DinoV2Encoder::load(vb.pp("backbone.0.encoder.encoder"), &config)
+        let encoder = Dinov2Backbone::load(vb.pp("backbone.0.encoder.encoder"), &config)
             .expect("Failed to load encoder");
 
         // Load Python's preprocessed input (step 03) for exact comparison
