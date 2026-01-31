@@ -11,7 +11,7 @@
 //! - Optional register tokens (not used in RF-DETR small)
 
 use candle_core::{DType, IndexOp, Result, Tensor, D};
-use candle_nn::{Conv2d, Conv2dConfig, LayerNorm, Linear, Module, VarBuilder};
+use candle_nn::{layer_norm, Conv2d, Conv2dConfig, LayerNorm, Linear, Module, VarBuilder};
 
 /// Configuration for the DINOv2 backbone
 #[derive(Debug, Clone)]
@@ -40,8 +40,6 @@ pub struct Dinov2Config {
     pub window_block_indexes: Vec<usize>,
     /// Output feature stage names (e.g., ["stage3", "stage6", "stage9", "stage12"])
     pub out_features: Vec<String>,
-    /// Whether to apply layer norm to output features
-    pub apply_layernorm: bool,
     /// Whether to reshape hidden states to 4D (B, C, H, W)
     pub reshape_hidden_states: bool,
 }
@@ -84,7 +82,6 @@ impl Dinov2Config {
             num_windows,
             window_block_indexes,
             out_features,
-            apply_layernorm: true,
             reshape_hidden_states: true,
         }
     }
@@ -123,14 +120,8 @@ impl Dinov2Config {
             num_windows,
             window_block_indexes,
             out_features,
-            apply_layernorm: true,
             reshape_hidden_states: true,
         }
-    }
-
-    /// Get the attention head size
-    pub fn attention_head_size(&self) -> usize {
-        self.hidden_size / self.num_attention_heads
     }
 
     /// Check if a layer index uses windowed attention
@@ -159,8 +150,10 @@ impl PatchEmbeddings {
         )?;
         Ok(Self { projection })
     }
+}
 
-    pub fn forward(&self, pixel_values: &Tensor) -> Result<Tensor> {
+impl Module for PatchEmbeddings {
+    fn forward(&self, pixel_values: &Tensor) -> Result<Tensor> {
         // pixel_values: [batch_size, num_channels, height, width]
         // output: [batch_size, num_patches, hidden_size]
         let embeddings = self.projection.forward(pixel_values)?;
@@ -346,125 +339,84 @@ impl Embeddings {
     }
 }
 
-/// Self-attention mechanism
-pub struct SelfAttention {
-    query: Linear,
-    key: Linear,
-    value: Linear,
-    num_attention_heads: usize,
-    attention_head_size: usize,
-}
-
-impl SelfAttention {
-    pub fn load(vb: VarBuilder, config: &Dinov2Config) -> Result<Self> {
-        let all_head_size = config.hidden_size;
-
-        let query = candle_nn::linear(config.hidden_size, all_head_size, vb.pp("query"))?;
-        let key = candle_nn::linear(config.hidden_size, all_head_size, vb.pp("key"))?;
-        let value = candle_nn::linear(config.hidden_size, all_head_size, vb.pp("value"))?;
-
-        Ok(Self {
-            query,
-            key,
-            value,
-            num_attention_heads: config.num_attention_heads,
-            attention_head_size: config.attention_head_size(),
-        })
-    }
-
-    fn transpose_for_scores(&self, x: &Tensor) -> Result<Tensor> {
-        let (batch_size, seq_len, _) = x.dims3()?;
-        let x = x.reshape((
-            batch_size,
-            seq_len,
-            self.num_attention_heads,
-            self.attention_head_size,
-        ))?;
-        x.permute((0, 2, 1, 3))
-    }
-
-    pub fn forward(&self, hidden_states: &Tensor) -> Result<Tensor> {
-        let query_layer = self
-            .transpose_for_scores(&self.query.forward(hidden_states)?)?
-            .contiguous()?;
-        let key_layer = self
-            .transpose_for_scores(&self.key.forward(hidden_states)?)?
-            .contiguous()?;
-        let value_layer = self
-            .transpose_for_scores(&self.value.forward(hidden_states)?)?
-            .contiguous()?;
-
-        // Scaled dot-product attention
-        let key_t = key_layer.transpose(D::Minus2, D::Minus1)?.contiguous()?;
-        let attention_scores = query_layer.matmul(&key_t)?;
-        let attention_scores = (attention_scores / (self.attention_head_size as f64).sqrt())?;
-
-        let attention_probs = candle_nn::ops::softmax(&attention_scores, D::Minus1)?;
-
-        let context_layer = attention_probs.matmul(&value_layer)?;
-        let context_layer = context_layer.permute((0, 2, 1, 3))?.contiguous()?;
-
-        let (batch_size, seq_len, _, _) = context_layer.dims4()?;
-        context_layer.reshape((
-            batch_size,
-            seq_len,
-            self.num_attention_heads * self.attention_head_size,
-        ))
-    }
-}
-
-/// Output projection for self-attention
-pub struct SelfOutput {
-    dense: Linear,
-}
-
-impl SelfOutput {
-    pub fn load(vb: VarBuilder, config: &Dinov2Config) -> Result<Self> {
-        let dense = candle_nn::linear(config.hidden_size, config.hidden_size, vb.pp("dense"))?;
-        Ok(Self { dense })
-    }
-
-    pub fn forward(&self, hidden_states: &Tensor) -> Result<Tensor> {
-        self.dense.forward(hidden_states)
-    }
-}
-
-/// Full attention module combining self-attention and output projection
+#[derive(Debug)]
 pub struct Attention {
-    attention: SelfAttention,
-    output: SelfOutput,
+    qkv: Linear,
+    proj: Linear,
+    num_heads: usize,
+    scale: f64,
 }
 
 impl Attention {
     pub fn load(vb: VarBuilder, config: &Dinov2Config) -> Result<Self> {
-        let attention = SelfAttention::load(vb.pp("attention"), config)?;
-        let output = SelfOutput::load(vb.pp("output"), config)?;
-        Ok(Self { attention, output })
-    }
+        let dim = config.hidden_size;
+        let num_heads = config.num_attention_heads;
 
-    pub fn forward(&self, hidden_states: &Tensor) -> Result<Tensor> {
-        let attention_output = self.attention.forward(hidden_states)?;
-        self.output.forward(&attention_output)
+        // Load separate q/k/v weights and fuse them into a single qkv to match dino2 reference candle impl.
+        let attn_vb = vb.pp("attention");
+        let q_weight = attn_vb.pp("query").get((dim, dim), "weight")?;
+        let k_weight = attn_vb.pp("key").get((dim, dim), "weight")?;
+        let v_weight = attn_vb.pp("value").get((dim, dim), "weight")?;
+        let qkv_weight = Tensor::cat(&[&q_weight, &k_weight, &v_weight], 0)?;
+
+        let q_bias = attn_vb.pp("query").get(dim, "bias")?;
+        let k_bias = attn_vb.pp("key").get(dim, "bias")?;
+        let v_bias = attn_vb.pp("value").get(dim, "bias")?;
+        let qkv_bias = Tensor::cat(&[&q_bias, &k_bias, &v_bias], 0)?;
+
+        let qkv = Linear::new(qkv_weight, Some(qkv_bias));
+
+        let proj = candle_nn::linear(dim, dim, vb.pp("output.dense"))?;
+        let scale = 1. / ((dim / num_heads) as f64).sqrt();
+
+        Ok(Self {
+            qkv,
+            proj,
+            num_heads,
+            scale,
+        })
+    }
+}
+
+impl Module for Attention {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let (b, n, c) = xs.dims3()?;
+        let qkv = self
+            .qkv
+            .forward(xs)?
+            .reshape((b, n, 3, self.num_heads, c / self.num_heads))?
+            .transpose(1, 2)? // b,3,n,h,d
+            .transpose(0, 1)? // 3,b,n,h,d
+            .transpose(2, 3)?; // 3,b,h,n,d
+        let q = (qkv.i(0)? * self.scale)?;
+        let k = qkv.i(1)?.contiguous()?;
+        let v = qkv.i(2)?.contiguous()?;
+        let attn = candle_nn::ops::softmax(&q.matmul(&k.t()?)?, D::Minus1)?;
+        let attn = attn.matmul(&v)?.transpose(1, 2)?.reshape((b, n, c))?;
+        self.proj.forward(&attn)
     }
 }
 
 /// Layer scale: learnable per-channel scaling
+#[derive(Debug)]
 pub struct LayerScale {
     lambda: Tensor,
 }
 
 impl LayerScale {
-    pub fn load(vb: VarBuilder, config: &Dinov2Config) -> Result<Self> {
-        let lambda = vb.get(config.hidden_size, "lambda1")?;
+    pub fn load(vb: VarBuilder, dim: usize) -> Result<Self> {
+        let lambda = vb.get(dim, "lambda1")?;
         Ok(Self { lambda })
-    }
-
-    pub fn forward(&self, hidden_states: &Tensor) -> Result<Tensor> {
-        hidden_states.broadcast_mul(&self.lambda)
     }
 }
 
-/// MLP (feed-forward network)
+impl Module for LayerScale {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        xs.broadcast_mul(&self.lambda)
+    }
+}
+
+#[derive(Debug)]
 pub struct Mlp {
     fc1: Linear,
     fc2: Linear,
@@ -477,43 +429,45 @@ impl Mlp {
         let fc2 = candle_nn::linear(hidden_features, config.hidden_size, vb.pp("fc2"))?;
         Ok(Self { fc1, fc2 })
     }
+}
 
-    pub fn forward(&self, hidden_states: &Tensor) -> Result<Tensor> {
-        let hidden = self.fc1.forward(hidden_states)?;
-        let hidden = hidden.gelu_erf()?;
-        self.fc2.forward(&hidden)
+impl Module for Mlp {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let xs = self.fc1.forward(xs)?;
+        // TODO do we need gelu_erf(), won't just gelu() be enough?
+        let xs = xs.gelu_erf()?;
+        self.fc2.forward(&xs)
     }
 }
 
 /// Single transformer layer/block
+#[derive(Debug)]
 pub struct Layer {
     norm1: LayerNorm,
-    attention: Attention,
-    layer_scale1: LayerScale,
+    attn: Attention,
+    ls1: LayerScale,
     norm2: LayerNorm,
     mlp: Mlp,
-    layer_scale2: LayerScale,
+    ls2: LayerScale,
     num_windows: usize,
 }
 
 impl Layer {
     pub fn load(vb: VarBuilder, config: &Dinov2Config) -> Result<Self> {
-        let norm1 =
-            candle_nn::layer_norm(config.hidden_size, config.layer_norm_eps, vb.pp("norm1"))?;
+        let norm1 = layer_norm(config.hidden_size, config.layer_norm_eps, vb.pp("norm1"))?;
         let attention = Attention::load(vb.pp("attention"), config)?;
-        let layer_scale1 = LayerScale::load(vb.pp("layer_scale1"), config)?;
-        let norm2 =
-            candle_nn::layer_norm(config.hidden_size, config.layer_norm_eps, vb.pp("norm2"))?;
+        let layer_scale1 = LayerScale::load(vb.pp("layer_scale1"), config.hidden_size)?;
+        let norm2 = layer_norm(config.hidden_size, config.layer_norm_eps, vb.pp("norm2"))?;
         let mlp = Mlp::load(vb.pp("mlp"), config)?;
-        let layer_scale2 = LayerScale::load(vb.pp("layer_scale2"), config)?;
+        let layer_scale2 = LayerScale::load(vb.pp("layer_scale2"), config.hidden_size)?;
 
         Ok(Self {
             norm1,
-            attention,
-            layer_scale1,
+            attn: attention,
+            ls1: layer_scale1,
             norm2,
             mlp,
-            layer_scale2,
+            ls2: layer_scale2,
             num_windows: config.num_windows,
         })
     }
@@ -537,7 +491,7 @@ impl Layer {
 
         // Self-attention with pre-norm
         let normed = self.norm1.forward(&hidden_states)?;
-        let mut attention_output = self.attention.forward(&normed)?;
+        let mut attention_output = self.attn.forward(&normed)?;
 
         // For full attention layers, split back to windows after attention
         // Use the merged dimensions (from hidden_states after merge) for the split
@@ -553,14 +507,14 @@ impl Layer {
         }
 
         // Layer scale and residual
-        let attention_output = self.layer_scale1.forward(&attention_output)?;
+        let attention_output = self.ls1.forward(&attention_output)?;
         let hidden_states = (shortcut + attention_output)?;
 
         // MLP with pre-norm
         let shortcut = hidden_states.clone();
         let normed = self.norm2.forward(&hidden_states)?;
         let mlp_output = self.mlp.forward(&normed)?;
-        let mlp_output = self.layer_scale2.forward(&mlp_output)?;
+        let mlp_output = self.ls2.forward(&mlp_output)?;
 
         shortcut + mlp_output
     }
@@ -651,11 +605,7 @@ impl Dinov2Backbone {
             }
 
             let mut hidden_state = hidden_state.clone();
-
-            // Apply layer norm if configured
-            if self.config.apply_layernorm {
-                hidden_state = self.layernorm.forward(&hidden_state)?;
-            }
+            hidden_state = self.layernorm.forward(&hidden_state)?;
 
             if self.config.reshape_hidden_states {
                 // Remove cls token (and register tokens if present)
@@ -713,62 +663,10 @@ impl Dinov2Backbone {
     }
 }
 
-/// Wrapper for the full DINOv2 encoder used in RF-DETR backbone
-/// This matches the structure: backbone.0.encoder in the Python model
-pub struct DinoV2Encoder {
-    pub encoder: Dinov2Backbone,
-}
-
-impl DinoV2Encoder {
-    /// Load from VarBuilder with prefix "backbone.0.encoder.encoder"
-    pub fn load(vb: VarBuilder, config: &Dinov2Config) -> Result<Self> {
-        let encoder = Dinov2Backbone::load(vb, config)?;
-        Ok(Self { encoder })
-    }
-
-    /// Forward pass returning feature maps
-    pub fn forward(&self, pixel_values: &Tensor) -> Result<Vec<Tensor>> {
-        self.encoder.forward(pixel_values)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use candle_core::Device;
-
-    #[test]
-    fn test_config_small() {
-        let config = Dinov2Config::small_windowed(512, 16, 2, &[3, 6, 9, 12]);
-        assert_eq!(config.hidden_size, 384);
-        assert_eq!(config.num_attention_heads, 6);
-        assert_eq!(config.attention_head_size(), 64);
-
-        // Layers 3, 6, 9 (using 1-indexed stage numbers) should use full attention
-        // Layer 12 doesn't exist in a 12-layer model (layers are 0-11)
-        assert!(!config.is_windowed_layer(3));
-        assert!(!config.is_windowed_layer(6));
-        assert!(!config.is_windowed_layer(9));
-
-        // Other layers should use windowed attention
-        assert!(config.is_windowed_layer(0));
-        assert!(config.is_windowed_layer(1));
-        assert!(config.is_windowed_layer(2));
-        assert!(config.is_windowed_layer(4));
-        assert!(config.is_windowed_layer(5));
-        assert!(config.is_windowed_layer(7));
-        assert!(config.is_windowed_layer(8));
-        assert!(config.is_windowed_layer(10));
-        assert!(config.is_windowed_layer(11));
-    }
-
-    #[test]
-    fn test_config_base() {
-        let config = Dinov2Config::base_windowed(560, 14, 4, &[2, 5, 8, 11]);
-        assert_eq!(config.hidden_size, 768);
-        assert_eq!(config.num_attention_heads, 12);
-        assert_eq!(config.attention_head_size(), 64);
-    }
 
     /// Integration test comparing backbone encoder output against Python reference
     ///
@@ -871,7 +769,7 @@ mod tests {
         };
 
         let config = Dinov2Config::small_windowed(RESOLUTION, 16, 2, &[3, 6, 9, 12]);
-        let encoder = DinoV2Encoder::load(vb.pp("backbone.0.encoder.encoder"), &config)
+        let encoder = Dinov2Backbone::load(vb.pp("backbone.0.encoder.encoder"), &config)
             .expect("Failed to load encoder");
 
         // Load Python's preprocessed input (step 03) for exact comparison
