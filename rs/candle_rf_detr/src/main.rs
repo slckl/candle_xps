@@ -50,7 +50,14 @@ pub enum Which {
     Medium,
     Base,
     Large,
-    Seg,
+    LargeDeprecated,
+    SegPreview,
+    SegNano,
+    SegSmall,
+    SegMedium,
+    SegLarge,
+    SegXLarge,
+    Seg2XLarge,
 }
 
 impl Which {
@@ -61,7 +68,14 @@ impl Which {
             Which::Medium => RfDetrConfig::medium(),
             Which::Base => RfDetrConfig::base(),
             Which::Large => RfDetrConfig::large(),
-            Which::Seg => RfDetrConfig::seg(),
+            Which::LargeDeprecated => RfDetrConfig::large_deprecated(),
+            Which::SegPreview => RfDetrConfig::seg_preview(),
+            Which::SegNano => RfDetrConfig::seg_nano(),
+            Which::SegSmall => RfDetrConfig::seg_small(),
+            Which::SegMedium => RfDetrConfig::seg_medium(),
+            Which::SegLarge => RfDetrConfig::seg_large(),
+            Which::SegXLarge => RfDetrConfig::seg_xlarge(),
+            Which::Seg2XLarge => RfDetrConfig::seg_2xlarge(),
         }
     }
 
@@ -72,7 +86,14 @@ impl Which {
             Which::Medium => "rfdetr-medium.safetensors",
             Which::Base => "rfdetr-base.safetensors",
             Which::Large => "rfdetr-large.safetensors",
-            Which::Seg => "rfdetr-seg-preview.safetensors",
+            Which::LargeDeprecated => "rfdetr-large-deprecated.safetensors",
+            Which::SegPreview => "rfdetr-seg-preview.safetensors",
+            Which::SegNano => "rfdetr-seg-nano.safetensors",
+            Which::SegSmall => "rfdetr-seg-small.safetensors",
+            Which::SegMedium => "rfdetr-seg-medium.safetensors",
+            Which::SegLarge => "rfdetr-seg-large.safetensors",
+            Which::SegXLarge => "rfdetr-seg-xlarge.safetensors",
+            Which::Seg2XLarge => "rfdetr-seg-2xlarge.safetensors",
         }
     }
 }

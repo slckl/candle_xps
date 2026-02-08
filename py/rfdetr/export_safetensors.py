@@ -20,9 +20,16 @@ from safetensors.torch import save_file
 from rfdetr import (
     RFDETRBase,
     RFDETRLarge,
+    RFDETRLargeDeprecated,
     RFDETRMedium,
     RFDETRNano,
+    RFDETRSeg2XLarge,
+    RFDETRSegLarge,
+    RFDETRSegMedium,
+    RFDETRSegNano,
     RFDETRSegPreview,
+    RFDETRSegSmall,
+    RFDETRSegXLarge,
     RFDETRSmall,
 )
 
@@ -32,7 +39,14 @@ MODEL_CLASSES = {
     "medium": RFDETRMedium,
     "base": RFDETRBase,
     "large": RFDETRLarge,
-    "seg": RFDETRSegPreview,
+    "large-deprecated": RFDETRLargeDeprecated,
+    "seg-nano": RFDETRSegNano,
+    "seg-small": RFDETRSegSmall,
+    "seg-medium": RFDETRSegMedium,
+    "seg-large": RFDETRSegLarge,
+    "seg-xlarge": RFDETRSegXLarge,
+    "seg-2xlarge": RFDETRSeg2XLarge,
+    "seg-preview": RFDETRSegPreview,
 }
 
 

@@ -240,6 +240,35 @@ impl RfDetrConfig {
     /// Create configuration for RF-DETR Large model
     pub fn large() -> Self {
         Self {
+            encoder: EncoderType::Dinov2WindowedSmall,
+            out_feature_indexes: vec![3, 6, 9, 12],
+            patch_size: 16,
+            num_windows: 2,
+            projector_scale: vec![ProjectorScale::P4],
+            dec_layers: 4,
+            hidden_dim: 256,
+            sa_nheads: 8,
+            ca_nheads: 16,
+            dec_n_points: 2,
+            num_queries: 300,
+            num_select: 300,
+            two_stage: true,
+            bbox_reparam: true,
+            lite_refpoint_refine: true,
+            layer_norm: true,
+            resolution: 704,
+            positional_encoding_size: 44,
+            num_classes: 91,
+            group_detr: 13,
+            segmentation_head: false,
+            seg_num_blocks: 0,
+            seg_downsample_ratio: 4,
+        }
+    }
+
+    /// Create configuration for RF-DETR Large model
+    pub fn large_deprecated() -> Self {
+        Self {
             encoder: EncoderType::Dinov2WindowedBase,
             out_feature_indexes: vec![2, 5, 8, 11],
             patch_size: 14,
@@ -267,7 +296,7 @@ impl RfDetrConfig {
     }
 
     /// Create configuration for RF-DETR Segmentation Preview model
-    pub fn seg() -> Self {
+    pub fn seg_preview() -> Self {
         Self {
             encoder: EncoderType::Dinov2WindowedSmall,
             out_feature_indexes: vec![3, 6, 9, 12],
@@ -291,6 +320,180 @@ impl RfDetrConfig {
             group_detr: 13,
             segmentation_head: true,
             seg_num_blocks: 4,
+            seg_downsample_ratio: 4,
+        }
+    }
+
+    /// Create configuration for RF-DETR Segmentation Nano model
+    pub fn seg_nano() -> Self {
+        Self {
+            encoder: EncoderType::Dinov2WindowedSmall,
+            out_feature_indexes: vec![3, 6, 9, 12],
+            patch_size: 12,
+            num_windows: 1,
+            projector_scale: vec![ProjectorScale::P4],
+            dec_layers: 4,
+            hidden_dim: 256,
+            sa_nheads: 8,
+            ca_nheads: 16,
+            dec_n_points: 2,
+            num_queries: 100,
+            num_select: 100,
+            two_stage: true,
+            bbox_reparam: true,
+            lite_refpoint_refine: true,
+            layer_norm: true,
+            resolution: 312,
+            positional_encoding_size: 26, // 312 / 12
+            num_classes: 91,
+            group_detr: 13,
+            segmentation_head: true,
+            seg_num_blocks: 4,
+            seg_downsample_ratio: 4,
+        }
+    }
+
+    /// Create configuration for RF-DETR Segmentation Small model
+    pub fn seg_small() -> Self {
+        Self {
+            encoder: EncoderType::Dinov2WindowedSmall,
+            out_feature_indexes: vec![3, 6, 9, 12],
+            patch_size: 12,
+            num_windows: 2,
+            projector_scale: vec![ProjectorScale::P4],
+            dec_layers: 4,
+            hidden_dim: 256,
+            sa_nheads: 8,
+            ca_nheads: 16,
+            dec_n_points: 2,
+            num_queries: 100,
+            num_select: 100,
+            two_stage: true,
+            bbox_reparam: true,
+            lite_refpoint_refine: true,
+            layer_norm: true,
+            resolution: 384,
+            positional_encoding_size: 32, // 384 / 12
+            num_classes: 91,
+            group_detr: 13,
+            segmentation_head: true,
+            seg_num_blocks: 4,
+            seg_downsample_ratio: 4,
+        }
+    }
+
+    /// Create configuration for RF-DETR Segmentation Medium model
+    pub fn seg_medium() -> Self {
+        Self {
+            encoder: EncoderType::Dinov2WindowedSmall,
+            out_feature_indexes: vec![3, 6, 9, 12],
+            patch_size: 12,
+            num_windows: 2,
+            projector_scale: vec![ProjectorScale::P4],
+            dec_layers: 5,
+            hidden_dim: 256,
+            sa_nheads: 8,
+            ca_nheads: 16,
+            dec_n_points: 2,
+            num_queries: 200,
+            num_select: 200,
+            two_stage: true,
+            bbox_reparam: true,
+            lite_refpoint_refine: true,
+            layer_norm: true,
+            resolution: 432,
+            positional_encoding_size: 36, // 432 / 12
+            num_classes: 91,
+            group_detr: 13,
+            segmentation_head: true,
+            seg_num_blocks: 5,
+            seg_downsample_ratio: 4,
+        }
+    }
+
+    /// Create configuration for RF-DETR Segmentation Large model
+    pub fn seg_large() -> Self {
+        Self {
+            encoder: EncoderType::Dinov2WindowedSmall,
+            out_feature_indexes: vec![3, 6, 9, 12],
+            patch_size: 12,
+            num_windows: 2,
+            projector_scale: vec![ProjectorScale::P4],
+            dec_layers: 5,
+            hidden_dim: 256,
+            sa_nheads: 8,
+            ca_nheads: 16,
+            dec_n_points: 2,
+            num_queries: 200,
+            num_select: 200,
+            two_stage: true,
+            bbox_reparam: true,
+            lite_refpoint_refine: true,
+            layer_norm: true,
+            resolution: 504,
+            positional_encoding_size: 42, // 504 / 12
+            num_classes: 91,
+            group_detr: 13,
+            segmentation_head: true,
+            seg_num_blocks: 5,
+            seg_downsample_ratio: 4,
+        }
+    }
+
+    /// Create configuration for RF-DETR Segmentation XLarge model
+    pub fn seg_xlarge() -> Self {
+        Self {
+            encoder: EncoderType::Dinov2WindowedSmall,
+            out_feature_indexes: vec![3, 6, 9, 12],
+            patch_size: 12,
+            num_windows: 2,
+            projector_scale: vec![ProjectorScale::P4],
+            dec_layers: 6,
+            hidden_dim: 256,
+            sa_nheads: 8,
+            ca_nheads: 16,
+            dec_n_points: 2,
+            num_queries: 300,
+            num_select: 300,
+            two_stage: true,
+            bbox_reparam: true,
+            lite_refpoint_refine: true,
+            layer_norm: true,
+            resolution: 624,
+            positional_encoding_size: 52, // 624 / 12
+            num_classes: 91,
+            group_detr: 13,
+            segmentation_head: true,
+            seg_num_blocks: 6,
+            seg_downsample_ratio: 4,
+        }
+    }
+
+    /// Create configuration for RF-DETR Segmentation 2XLarge model
+    pub fn seg_2xlarge() -> Self {
+        Self {
+            encoder: EncoderType::Dinov2WindowedSmall,
+            out_feature_indexes: vec![3, 6, 9, 12],
+            patch_size: 12,
+            num_windows: 2,
+            projector_scale: vec![ProjectorScale::P4],
+            dec_layers: 6,
+            hidden_dim: 256,
+            sa_nheads: 8,
+            ca_nheads: 16,
+            dec_n_points: 2,
+            num_queries: 300,
+            num_select: 300,
+            two_stage: true,
+            bbox_reparam: true,
+            lite_refpoint_refine: true,
+            layer_norm: true,
+            resolution: 768,
+            positional_encoding_size: 64, // 768 / 12
+            num_classes: 91,
+            group_detr: 13,
+            segmentation_head: true,
+            seg_num_blocks: 6,
             seg_downsample_ratio: 4,
         }
     }
