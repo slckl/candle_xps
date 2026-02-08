@@ -5,8 +5,10 @@
 # ------------------------------------------------------------------------
 
 
+import glob
 import json
 import os
+import warnings
 from collections import defaultdict
 from copy import deepcopy
 from logging import getLogger
@@ -16,7 +18,11 @@ import numpy as np
 import supervision as sv
 import torch
 import torchvision.transforms.functional as F
+import yaml
 from PIL import Image
+
+# from rfdetr.datasets.coco import is_valid_coco_dataset
+# from rfdetr.datasets.yolo import is_valid_yolo_dataset
 
 try:
     torch.set_float32_matmul_precision("high")
@@ -27,9 +33,16 @@ from rfdetr.config import (
     ModelConfig,
     RFDETRBaseConfig,
     RFDETRLargeConfig,
+    RFDETRLargeDeprecatedConfig,
     RFDETRMediumConfig,
     RFDETRNanoConfig,
+    RFDETRSeg2XLargeConfig,
+    RFDETRSegLargeConfig,
+    RFDETRSegMediumConfig,
+    RFDETRSegNanoConfig,
     RFDETRSegPreviewConfig,
+    RFDETRSegSmallConfig,
+    RFDETRSegXLargeConfig,
     RFDETRSmallConfig,
     SegmentationTrainConfig,
     TrainConfig,
@@ -467,20 +480,6 @@ class RFDETRBase(RFDETR):
         return TrainConfig(**kwargs)
 
 
-class RFDETRLarge(RFDETR):
-    """
-    Train an RF-DETR Large model.
-    """
-
-    size = "rfdetr-large"
-
-    def get_model_config(self, **kwargs):
-        return RFDETRLargeConfig(**kwargs)
-
-    def get_train_config(self, **kwargs):
-        return TrainConfig(**kwargs)
-
-
 class RFDETRNano(RFDETR):
     """
     Train an RF-DETR Nano model.
@@ -523,11 +522,138 @@ class RFDETRMedium(RFDETR):
         return TrainConfig(**kwargs)
 
 
+class RFDETRLargeNew(RFDETR):
+    size = "rfdetr-large"
+
+    def get_model_config(self, **kwargs):
+        return RFDETRLargeConfig(**kwargs)
+
+    def get_train_config(self, **kwargs):
+        return TrainConfig(**kwargs)
+
+
+class RFDETRLargeDeprecated(RFDETR):
+    """
+    Train an RF-DETR Large model.
+    """
+
+    size = "rfdetr-large"
+
+    def __init__(self, **kwargs):
+        warnings.warn(
+            "RFDETRLargeDeprecated is deprecated and will be removed in a future version. "
+            "Please use RFDETRLarge instead.",
+            category=DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(**kwargs)
+
+    def get_model_config(self, **kwargs):
+        return RFDETRLargeDeprecatedConfig(**kwargs)
+
+    def get_train_config(self, **kwargs):
+        return TrainConfig(**kwargs)
+
+
+class RFDETRLarge(RFDETR):
+    size = "rfdetr-large"
+
+    def __init__(self, **kwargs):
+        self.init_error = None
+        self.is_deprecated = False
+        try:
+            super().__init__(**kwargs)
+        except Exception as e:
+            self.init_error = e
+            self.is_deprecated = True
+            try:
+                super().__init__(**kwargs)
+                logger.warning(
+                    "\n"
+                    "=" * 100 + "\n"
+                    "WARNING: Automatically switched to deprecated model configuration, due to using deprecated weights. "
+                    "This will be removed in a future version.\n"
+                    "Please retrain your model with the new weights and configuration.\n"
+                    "=" * 100 + "\n"
+                )
+            except Exception:
+                raise self.init_error
+
+    def get_model_config(self, **kwargs):
+        if not self.is_deprecated:
+            return RFDETRLargeConfig(**kwargs)
+        else:
+            return RFDETRLargeDeprecatedConfig(**kwargs)
+
+    def get_train_config(self, **kwargs):
+        return TrainConfig(**kwargs)
+
+
 class RFDETRSegPreview(RFDETR):
     size = "rfdetr-seg-preview"
 
     def get_model_config(self, **kwargs):
         return RFDETRSegPreviewConfig(**kwargs)
+
+    def get_train_config(self, **kwargs):
+        return SegmentationTrainConfig(**kwargs)
+
+
+class RFDETRSegNano(RFDETR):
+    size = "rfdetr-seg-nano"
+
+    def get_model_config(self, **kwargs):
+        return RFDETRSegNanoConfig(**kwargs)
+
+    def get_train_config(self, **kwargs):
+        return SegmentationTrainConfig(**kwargs)
+
+
+class RFDETRSegSmall(RFDETR):
+    size = "rfdetr-seg-small"
+
+    def get_model_config(self, **kwargs):
+        return RFDETRSegSmallConfig(**kwargs)
+
+    def get_train_config(self, **kwargs):
+        return SegmentationTrainConfig(**kwargs)
+
+
+class RFDETRSegMedium(RFDETR):
+    size = "rfdetr-seg-medium"
+
+    def get_model_config(self, **kwargs):
+        return RFDETRSegMediumConfig(**kwargs)
+
+    def get_train_config(self, **kwargs):
+        return SegmentationTrainConfig(**kwargs)
+
+
+class RFDETRSegLarge(RFDETR):
+    size = "rfdetr-seg-large"
+
+    def get_model_config(self, **kwargs):
+        return RFDETRSegLargeConfig(**kwargs)
+
+    def get_train_config(self, **kwargs):
+        return SegmentationTrainConfig(**kwargs)
+
+
+class RFDETRSegXLarge(RFDETR):
+    size = "rfdetr-seg-xlarge"
+
+    def get_model_config(self, **kwargs):
+        return RFDETRSegXLargeConfig(**kwargs)
+
+    def get_train_config(self, **kwargs):
+        return SegmentationTrainConfig(**kwargs)
+
+
+class RFDETRSeg2XLarge(RFDETR):
+    size = "rfdetr-seg-2xlarge"
+
+    def get_model_config(self, **kwargs):
+        return RFDETRSeg2XLargeConfig(**kwargs)
 
     def get_train_config(self, **kwargs):
         return SegmentationTrainConfig(**kwargs)

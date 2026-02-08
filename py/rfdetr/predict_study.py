@@ -12,9 +12,16 @@ from torchvision.transforms import functional as F
 from rfdetr import (
     RFDETRBase,
     RFDETRLarge,
+    RFDETRLargeDeprecated,
     RFDETRMedium,
     RFDETRNano,
+    RFDETRSeg2XLarge,
+    RFDETRSegLarge,
+    RFDETRSegMedium,
+    RFDETRSegNano,
     RFDETRSegPreview,
+    RFDETRSegSmall,
+    RFDETRSegXLarge,
     RFDETRSmall,
 )
 from rfdetr.util.coco_classes import COCO_CLASSES
@@ -25,7 +32,14 @@ MODEL_CLASSES = {
     "medium": RFDETRMedium,
     "base": RFDETRBase,
     "large": RFDETRLarge,
-    "seg": RFDETRSegPreview,
+    "large-deprecated": RFDETRLargeDeprecated,
+    "seg-nano": RFDETRSegNano,
+    "seg-small": RFDETRSegSmall,
+    "seg-medium": RFDETRSegMedium,
+    "seg-large": RFDETRSegLarge,
+    "seg-xlarge": RFDETRSegXLarge,
+    "seg-2xlarge": RFDETRSeg2XLarge,
+    "seg-preview": RFDETRSegPreview,
 }
 
 

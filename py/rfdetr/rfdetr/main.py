@@ -3,7 +3,7 @@
 # Copyright (c) 2025 Roboflow. All Rights Reserved.
 # Licensed under the Apache License, Version 2.0 [see LICENSE for details]
 # ------------------------------------------------------------------------
-# Modified from LW-DETR (https://github.com/Atten4Vis/LW-DETR)
+# Copied and modified from LW-DETR (https://github.com/Atten4Vis/LW-DETR)
 # Copyright (c) 2024 Baidu. All Rights Reserved.
 # ------------------------------------------------------------------------
 # Modified from Conditional DETR (https://github.com/Atten4Vis/ConditionalDETR)
@@ -23,10 +23,12 @@ import copy
 import datetime
 import json
 import math
+import multiprocessing
 import os
 import random
 import shutil
 import time
+import warnings
 from copy import deepcopy
 from logging import getLogger
 from pathlib import Path
@@ -54,7 +56,8 @@ if str(os.environ.get("USE_FILE_SYSTEM_SHARING", "False")).lower() in ["true", "
 
 logger = getLogger(__name__)
 
-HOSTED_MODELS = {
+# THE FOLLOWING OPEN_SOURCE_MODELS ARE COVERED BY THE APACHE 2.0 LICENSE
+OPEN_SOURCE_MODELS = {
     "rf-detr-base.pth": "https://storage.googleapis.com/rfdetr/rf-detr-base-coco.pth",
     "rf-detr-base-o365.pth": "https://storage.googleapis.com/rfdetr/top-secret-1234/lwdetr_dinov2_small_o365_checkpoint.pth",
     # below is a less converged model that may be better for finetuning but worse for inference
@@ -64,7 +67,19 @@ HOSTED_MODELS = {
     "rf-detr-small.pth": "https://storage.googleapis.com/rfdetr/small_coco/checkpoint_best_regular.pth",
     "rf-detr-medium.pth": "https://storage.googleapis.com/rfdetr/medium_coco/checkpoint_best_regular.pth",
     "rf-detr-seg-preview.pt": "https://storage.googleapis.com/rfdetr/rf-detr-seg-preview.pt",
+    "rf-detr-large-2026.pth": "https://storage.googleapis.com/rfdetr/rf-detr-large-2026.pth",
+    "rf-detr-xlarge.pth": "https://storage.googleapis.com/rfdetr/rf-detr-xl-ft.pth",
+    "rf-detr-xxlarge.pth": "https://storage.googleapis.com/rfdetr/rf-detr-2xl-ft.pth",
+    "rf-detr-seg-nano.pt": "https://storage.googleapis.com/rfdetr/rf-detr-seg-n-ft.pth",
+    "rf-detr-seg-small.pt": "https://storage.googleapis.com/rfdetr/rf-detr-seg-s-ft.pth",
+    "rf-detr-seg-medium.pt": "https://storage.googleapis.com/rfdetr/rf-detr-seg-m-ft.pth",
+    "rf-detr-seg-large.pt": "https://storage.googleapis.com/rfdetr/rf-detr-seg-l-ft.pth",
+    "rf-detr-seg-xlarge.pt": "https://storage.googleapis.com/rfdetr/rf-detr-seg-xl-ft.pth",
+    "rf-detr-seg-xxlarge.pt": "https://storage.googleapis.com/rfdetr/rf-detr-seg-2xl-ft.pth",
 }
+
+
+HOSTED_MODELS = {**OPEN_SOURCE_MODELS}
 
 
 def download_pretrain_weights(pretrain_weights: str, redownload=False):
@@ -106,6 +121,9 @@ class Model:
 
             checkpoint_num_classes = checkpoint["model"]["class_embed.bias"].shape[0]
             if checkpoint_num_classes != args.num_classes + 1:
+                logger.warning(
+                    f"Reinitializing detection head with {checkpoint_num_classes} classes"
+                )
                 self.reinitialize_detection_head(checkpoint_num_classes)
             # add support to exclude_keys
             # e.g., when load object365 pretrain, do not load `class_embed.[weight, bias]`
@@ -280,6 +298,26 @@ class Model:
 
         effective_batch_size = args.batch_size * args.grad_accum_steps
         min_batches = kwargs.get("min_batches", 5)
+
+        num_workers = args.num_workers
+        # Hotfix for https://github.com/roboflow/rf-detr/issues/428
+        # On platforms using 'spawn' (Windows, macOS), multiprocessing requires the entry point
+        # to be protected by `if __name__ == '__main__':`. If it's missing, we force
+        # num_workers=0 to prevent a RuntimeError that crashes the process.
+        if (
+            num_workers > 0
+            and multiprocessing.get_start_method(allow_none=True) == "spawn"
+        ):
+            import __main__
+
+            if not hasattr(__main__, "__file__") or not __main__.__name__ == "__main__":
+                warnings.warn(
+                    "Setting num_workers to 0 because the script is not wrapped in "
+                    "`if __name__ == '__main__':`. This is required for multiprocessing with the 'spawn' start method.",
+                    RuntimeWarning,
+                )
+                num_workers = 0
+
         if len(dataset_train) < effective_batch_size * min_batches:
             logger.info(
                 f"Training with uniform sampler because dataset is too small: {len(dataset_train)} < {effective_batch_size * min_batches}"
@@ -293,7 +331,7 @@ class Model:
                 dataset_train,
                 batch_size=effective_batch_size,
                 collate_fn=utils.collate_fn,
-                num_workers=args.num_workers,
+                num_workers=num_workers,
                 sampler=sampler,
             )
         else:
@@ -304,7 +342,7 @@ class Model:
                 dataset_train,
                 batch_sampler=batch_sampler_train,
                 collate_fn=utils.collate_fn,
-                num_workers=args.num_workers,
+                num_workers=num_workers,
             )
 
         data_loader_val = DataLoader(
@@ -313,7 +351,7 @@ class Model:
             sampler=sampler_val,
             drop_last=False,
             collate_fn=utils.collate_fn,
-            num_workers=args.num_workers,
+            num_workers=num_workers,
         )
         data_loader_test = DataLoader(
             dataset_test,
@@ -321,7 +359,7 @@ class Model:
             sampler=sampler_test,
             drop_last=False,
             collate_fn=utils.collate_fn,
-            num_workers=args.num_workers,
+            num_workers=num_workers,
         )
 
         base_ds = get_coco_api_from_dataset(dataset_val)
@@ -474,7 +512,7 @@ class Model:
 
                         utils.save_on_master(weights, checkpoint_path)
 
-            with torch.inference_mode():
+            with torch.no_grad():
                 test_stats, coco_evaluator = evaluate(
                     model,
                     criterion,
@@ -598,17 +636,13 @@ class Model:
 
         if utils.is_main_process():
             if best_is_ema:
-                shutil.copy2(
-                    output_dir / "checkpoint_best_ema.pth",
-                    output_dir / "checkpoint_best_total.pth",
-                )
+                best_checkpoint = output_dir / "checkpoint_best_ema.pth"
             else:
-                shutil.copy2(
-                    output_dir / "checkpoint_best_regular.pth",
-                    output_dir / "checkpoint_best_total.pth",
-                )
+                best_checkpoint = output_dir / "checkpoint_best_regular.pth"
 
-            utils.strip_checkpoint(output_dir / "checkpoint_best_total.pth")
+            if best_checkpoint.exists():
+                shutil.copy2(best_checkpoint, output_dir / "checkpoint_best_total.pth")
+                utils.strip_checkpoint(output_dir / "checkpoint_best_total.pth")
 
             best_map_5095 = max(best_map_5095, best_map_ema_5095)
             if best_is_ema:
@@ -673,7 +707,7 @@ class Model:
         **kwargs,
     ):
         """Export the trained model to ONNX format"""
-        print(f"Exporting model to ONNX format")
+        print("Exporting model to ONNX format")
         try:
             from rfdetr.deploy.export import (
                 export_onnx,
@@ -849,6 +883,12 @@ def get_args_parser():
     parser = argparse.ArgumentParser("Set transformer detector", add_help=False)
     parser.add_argument("--num_classes", default=2, type=int)
     parser.add_argument("--grad_accum_steps", default=1, type=int)
+    parser.add_argument(
+        "--print_freq",
+        default=10,
+        type=int,
+        help="log frequency (in steps) during train/eval",
+    )
     parser.add_argument("--amp", default=False, type=bool)
     parser.add_argument("--lr", default=1e-4, type=float)
     parser.add_argument("--lr_encoder", default=1.5e-4, type=float)
@@ -1229,6 +1269,7 @@ def populate_args(
     # Basic training parameters
     num_classes=2,
     grad_accum_steps=1,
+    print_freq=10,
     amp=False,
     lr=1e-4,
     lr_encoder=1.5e-4,
@@ -1341,6 +1382,7 @@ def populate_args(
     args = argparse.Namespace(
         num_classes=num_classes,
         grad_accum_steps=grad_accum_steps,
+        print_freq=print_freq,
         amp=amp,
         lr=lr,
         lr_encoder=lr_encoder,
