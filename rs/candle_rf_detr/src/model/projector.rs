@@ -19,12 +19,15 @@
 //! - stages: C2f -> LayerNorm
 
 use candle_core::{Result, Tensor, D};
-use candle_nn::{Conv2d, Conv2dConfig, ConvTranspose2d, ConvTranspose2dConfig, Module, VarBuilder};
+use candle_nn::{
+    Activation, Conv2d, Conv2dConfig, ConvTranspose2d, ConvTranspose2dConfig, Module, VarBuilder,
+};
 
 /// 2D Layer Normalization (channels-last style, applied to NCHW tensors)
 ///
 /// This is the LayerNorm variant used in the projector, which normalizes
 /// over the channel dimension for inputs of shape (batch, channels, height, width).
+#[derive(Debug)]
 pub struct LayerNorm2d {
     weight: Tensor,
     bias: Tensor,
@@ -57,16 +60,7 @@ impl LayerNorm2d {
     }
 }
 
-/// Activation type for ConvX
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Activation {
-    Silu,
-    Relu,
-}
-
-/// Convolution + LayerNorm + Activation module
-///
-/// This is the ConvX module from the Python implementation.
+#[derive(Debug)]
 pub struct ConvX {
     conv: Conv2d,
     bn: LayerNorm2d,
@@ -75,23 +69,6 @@ pub struct ConvX {
 
 impl ConvX {
     pub fn load(
-        vb: VarBuilder,
-        in_channels: usize,
-        out_channels: usize,
-        kernel_size: usize,
-        stride: usize,
-    ) -> Result<Self> {
-        Self::load_with_activation(
-            vb,
-            in_channels,
-            out_channels,
-            kernel_size,
-            stride,
-            Activation::Silu,
-        )
-    }
-
-    pub fn load_with_activation(
         vb: VarBuilder,
         in_channels: usize,
         out_channels: usize,
@@ -127,10 +104,7 @@ impl Module for ConvX {
         let x = x.contiguous()?;
         let x = self.conv.forward(&x)?;
         let x = self.bn.forward(&x)?;
-        match self.activation {
-            Activation::Silu => x.silu(),
-            Activation::Relu => x.relu(),
-        }
+        self.activation.forward(&x)
     }
 }
 
@@ -193,7 +167,7 @@ impl SamplingModule {
         } else if scale == 0.5 {
             // Downsample: ConvX with stride=2, keeps channels
             // Weight path: stages_sampling.{scale}.{feat}.0.conv.weight, .0.bn.weight/bias
-            let convx = ConvX::load_with_activation(
+            let convx = ConvX::load(
                 vb.pp("0"),
                 in_channels,
                 in_channels,
@@ -206,8 +180,10 @@ impl SamplingModule {
             candle_core::bail!("Unsupported scale factor: {}", scale);
         }
     }
+}
 
-    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+impl Module for SamplingModule {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
         match self {
             SamplingModule::Identity => Ok(x.clone()),
             SamplingModule::Upsample(block) => block.forward(x),
@@ -230,15 +206,17 @@ impl Bottleneck {
         // e=1.0 means hidden channels = c2
         let c_ = c2; // hidden channels (e=1.0)
 
-        let cv1 = ConvX::load_with_activation(vb.pp("cv1"), c1, c_, 3, 1, Activation::Silu)?;
-        let cv2 = ConvX::load_with_activation(vb.pp("cv2"), c_, c2, 3, 1, Activation::Silu)?;
+        let cv1 = ConvX::load(vb.pp("cv1"), c1, c_, 3, 1, Activation::Silu)?;
+        let cv2 = ConvX::load(vb.pp("cv2"), c_, c2, 3, 1, Activation::Silu)?;
 
         let add = shortcut && c1 == c2;
 
         Ok(Self { cv1, cv2, add })
     }
+}
 
-    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+impl Module for Bottleneck {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
         let out = self.cv2.forward(&self.cv1.forward(x)?)?;
         if self.add {
             x + out
@@ -276,10 +254,10 @@ impl C2f {
         let c = (c2 as f64 * e) as usize; // hidden channels
 
         // cv1 outputs 2*c channels
-        let cv1 = ConvX::load(vb.pp("cv1"), c1, 2 * c, 1, 1)?;
+        let cv1 = ConvX::load(vb.pp("cv1"), c1, 2 * c, 1, 1, Activation::Silu)?;
 
         // cv2 takes (2 + n) * c channels and outputs c2
-        let cv2 = ConvX::load(vb.pp("cv2"), (2 + n) * c, c2, 1, 1)?;
+        let cv2 = ConvX::load(vb.pp("cv2"), (2 + n) * c, c2, 1, 1, Activation::Silu)?;
 
         // Load n bottleneck modules
         let mut bottlenecks = Vec::with_capacity(n);
@@ -295,8 +273,10 @@ impl C2f {
             bottlenecks,
         })
     }
+}
 
-    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
+impl Module for C2f {
+    fn forward(&self, x: &Tensor) -> Result<Tensor> {
         // cv1 forward
         let cv1_out = self.cv1.forward(x)?;
 
@@ -407,8 +387,6 @@ impl MultiScaleProjector {
         })
     }
 
-    /// Forward pass
-    ///
     /// # Arguments
     /// * `x` - Vector of feature maps from encoder, each of shape [B, C, H, W]
     ///
