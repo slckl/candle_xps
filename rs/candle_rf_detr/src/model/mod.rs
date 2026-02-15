@@ -156,7 +156,7 @@ impl RfDetr {
     ///
     /// # Returns
     /// A vector of position encodings, each with shape [batch_size, hidden_dim, h, w]
-    pub fn compute_position_encodings(
+    fn compute_position_encodings(
         &self,
         feature_maps: &[Tensor],
         device: &Device,
@@ -183,8 +183,6 @@ impl RfDetr {
     /// - bbox_predictions: [batch_size, num_queries, 4] in (cx, cy, w, h) format
     /// - mask_logits: optional, [batch_size, num_queries, H', W'] where H' = resolution / downsample_ratio
     pub fn forward(&self, pixel_values: &Tensor) -> Result<(Tensor, Tensor, Option<Tensor>)> {
-        // Dino2 windowed backbone -> multi-scale projector -> position encodings -> transformer -> class + bbox heads + seg head
-
         // Backbone -> projector
         // [batch_size, 3, height, width] -> [batch_size, encoder_hidden_dim, h, w]
         let encoder_outputs = self.backbone_encoder.forward(pixel_values)?;

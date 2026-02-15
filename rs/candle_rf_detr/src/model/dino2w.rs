@@ -441,10 +441,12 @@ pub struct Layer {
     mlp: Mlp,
     ls2: LayerScale,
     num_windows: usize,
+    /// Does this layer need to run full attention or just windowed?
+    full_attention: bool,
 }
 
 impl Layer {
-    pub fn load(vb: VarBuilder, config: &Dinov2Config) -> Result<Self> {
+    pub fn load(vb: VarBuilder, config: &Dinov2Config, full_attention: bool) -> Result<Self> {
         let norm1 = layer_norm(config.hidden_size, config.layer_norm_eps, vb.pp("norm1"))?;
         let attention = Attention::load(vb.pp("attention"), config)?;
         let layer_scale1 = LayerScale::load(vb.pp("layer_scale1"), config.hidden_size)?;
@@ -460,24 +462,27 @@ impl Layer {
             mlp,
             ls2: layer_scale2,
             num_windows: config.num_windows,
+            full_attention,
         })
     }
+}
 
-    pub fn forward(&self, hidden_states: &Tensor, run_full_attention: bool) -> Result<Tensor> {
-        let shortcut = hidden_states.clone();
+impl Module for Layer {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let shortcut = xs.clone();
 
         // For full attention layers, merge windows before attention
         // Save the windowed dimensions for reshaping back later
-        let (windowed_b, windowed_hw, windowed_c) = hidden_states.dims3()?;
-        let hidden_states = if run_full_attention && self.num_windows > 1 {
+        let (windowed_b, windowed_hw, windowed_c) = xs.dims3()?;
+        let hidden_states = if self.full_attention && self.num_windows > 1 {
             let num_windows_sq = self.num_windows * self.num_windows;
-            hidden_states.reshape((
+            xs.reshape((
                 windowed_b / num_windows_sq,
                 num_windows_sq * windowed_hw,
                 windowed_c,
             ))?
         } else {
-            hidden_states.clone()
+            xs.clone()
         };
 
         // Self-attention with pre-norm
@@ -486,7 +491,7 @@ impl Layer {
 
         // For full attention layers, split back to windows after attention
         // Use the merged dimensions (from hidden_states after merge) for the split
-        if run_full_attention && self.num_windows > 1 {
+        if self.full_attention && self.num_windows > 1 {
             let (merged_b, merged_hw, c) = hidden_states.dims3()?;
             let num_windows_sq = self.num_windows * self.num_windows;
             // Split back: [B, num_win^2 * hw_per_win, C] -> [B * num_win^2, hw_per_win, C]
@@ -521,7 +526,8 @@ impl Encoder {
     pub fn load(vb: VarBuilder, config: &Dinov2Config) -> Result<Self> {
         let mut layers = Vec::with_capacity(config.num_hidden_layers);
         for i in 0..config.num_hidden_layers {
-            let layer = Layer::load(vb.pp(format!("layer.{}", i)), config)?;
+            let full_attention = !config.is_windowed_layer(i);
+            let layer = Layer::load(vb.pp(format!("layer.{}", i)), config, full_attention)?;
             layers.push(layer);
         }
         Ok(Self {
@@ -531,14 +537,13 @@ impl Encoder {
     }
 
     /// Forward pass returning hidden states at all layers
-    pub fn forward(&self, hidden_states: &Tensor) -> Result<Vec<Tensor>> {
+    pub fn forward(&self, xs: &Tensor) -> Result<Vec<Tensor>> {
         let mut all_hidden_states = Vec::with_capacity(self.config.num_hidden_layers + 1);
-        all_hidden_states.push(hidden_states.clone());
+        all_hidden_states.push(xs.clone());
 
-        let mut hidden_states = hidden_states.clone();
-        for (i, layer) in self.layers.iter().enumerate() {
-            let run_full_attention = !self.config.is_windowed_layer(i);
-            hidden_states = layer.forward(&hidden_states, run_full_attention)?;
+        let mut hidden_states = xs.clone();
+        for layer in &self.layers {
+            hidden_states = layer.forward(&hidden_states)?;
             all_hidden_states.push(hidden_states.clone());
         }
 
