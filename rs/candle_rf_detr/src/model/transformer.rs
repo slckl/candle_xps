@@ -23,16 +23,14 @@
 //! The detection results are qualitatively similar to the Python implementation.
 
 use candle_core::{DType, IndexOp, Result, Tensor, D};
-use candle_nn::{linear, Linear, Module, VarBuilder};
+use candle_nn::{linear, Activation, Linear, Module, Sequential, VarBuilder};
 
-/// Multi-Layer Perceptron (MLP / FFN)
-///
-/// A simple feed-forward network with ReLU activations between layers.
-pub struct Mlp {
-    layers: Vec<Linear>,
+/// MLP with ReLU between layers, used for bbox regression head.
+pub struct BboxMlp {
+    layers: Sequential,
 }
 
-impl Mlp {
+impl BboxMlp {
     pub fn load(
         input_dim: usize,
         hidden_dim: usize,
@@ -40,7 +38,7 @@ impl Mlp {
         num_layers: usize,
         vb: VarBuilder,
     ) -> Result<Self> {
-        let mut layers = Vec::with_capacity(num_layers);
+        let mut layers = candle_nn::seq();
 
         for i in 0..num_layers {
             let in_dim = if i == 0 { input_dim } else { hidden_dim };
@@ -50,22 +48,19 @@ impl Mlp {
                 hidden_dim
             };
             let layer = linear(in_dim, out_dim, vb.pp(format!("layers.{}", i)))?;
-            layers.push(layer);
+            layers = layers.add(layer);
+            if i < num_layers - 1 {
+                layers = layers.add(Activation::Relu);
+            }
         }
 
         Ok(Self { layers })
     }
+}
 
-    /// Forward pass
-    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let mut output = x.clone();
-        for (i, layer) in self.layers.iter().enumerate() {
-            output = layer.forward(&output)?;
-            if i < self.layers.len() - 1 {
-                output = output.relu()?;
-            }
-        }
-        Ok(output)
+impl Module for BboxMlp {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        self.layers.forward(xs)
     }
 }
 
@@ -852,7 +847,7 @@ pub struct TransformerDecoder {
     /// Output norm
     norm: candle_nn::LayerNorm,
     /// Reference point head (MLP for computing query position from reference points)
-    ref_point_head: Mlp,
+    ref_point_head: BboxMlp,
     /// Hidden dimension
     d_model: usize,
     /// Whether to use lite reference point refinement
@@ -860,7 +855,7 @@ pub struct TransformerDecoder {
     /// Whether to use bbox reparameterization
     bbox_reparam: bool,
     /// Bbox embed for iterative refinement (shared with main model)
-    bbox_embed: Option<Mlp>,
+    bbox_embed: Option<BboxMlp>,
 }
 
 impl TransformerDecoder {
@@ -894,7 +889,8 @@ impl TransformerDecoder {
         let norm = candle_nn::layer_norm(d_model, 1e-5, vb.pp("norm"))?;
 
         // ref_point_head: MLP(2 * d_model, d_model, d_model, 2)
-        let ref_point_head = Mlp::load(2 * d_model, d_model, d_model, 2, vb.pp("ref_point_head"))?;
+        let ref_point_head =
+            BboxMlp::load(2 * d_model, d_model, d_model, 2, vb.pp("ref_point_head"))?;
 
         Ok(Self {
             layers,
@@ -966,7 +962,6 @@ impl TransformerDecoder {
         &self,
         tgt: &Tensor,
         memory: &Tensor,
-        _pos: &Tensor,
         refpoints_unsigmoid: &Tensor,
         spatial_shapes: &[(usize, usize)],
         level_start_index: &[usize],
@@ -1082,7 +1077,7 @@ pub struct Transformer {
     /// Two-stage: encoder output class embed
     enc_out_class_embed: Linear,
     /// Two-stage: encoder output bbox embed
-    enc_out_bbox_embed: Mlp,
+    enc_out_bbox_embed: BboxMlp,
 
     /// Configuration
     d_model: usize,
@@ -1125,7 +1120,8 @@ impl Transformer {
         let enc_output = linear(d_model, d_model, vb.pp("enc_output.0"))?;
         let enc_output_norm = candle_nn::layer_norm(d_model, 1e-5, vb.pp("enc_output_norm.0"))?;
         let enc_out_class_embed = linear(d_model, num_classes, vb.pp("enc_out_class_embed.0"))?;
-        let enc_out_bbox_embed = Mlp::load(d_model, d_model, 4, 3, vb.pp("enc_out_bbox_embed.0"))?;
+        let enc_out_bbox_embed =
+            BboxMlp::load(d_model, d_model, 4, 3, vb.pp("enc_out_bbox_embed.0"))?;
 
         Ok(Self {
             decoder,
@@ -1174,7 +1170,6 @@ impl Transformer {
 
         // Concatenate all levels
         let memory = Tensor::cat(&src_flatten, 1)?; // [bs, sum(h*w), d_model]
-        let lvl_pos_embed = Tensor::cat(&lvl_pos_embed_flatten, 1)?;
 
         // Compute level start indices
         let mut level_start_index = vec![0usize];
@@ -1271,7 +1266,6 @@ impl Transformer {
         let (hs, references) = self.decoder.forward(
             &tgt,
             &memory,
-            &lvl_pos_embed,
             &refpoints,
             &spatial_shapes,
             &level_start_index,
@@ -1419,7 +1413,7 @@ mod tests {
         let _ = vb.get_with_hints((64, 256), "layers.1.weight", candle_nn::Init::Const(0.01));
         let _ = vb.get_with_hints(64, "layers.1.bias", candle_nn::Init::Const(0.0));
 
-        let mlp = Mlp::load(128, 256, 64, 2, vb).unwrap();
+        let mlp = BboxMlp::load(128, 256, 64, 2, vb).unwrap();
         let input = Tensor::ones((2, 10, 128), DType::F32, &device).unwrap();
         let output = mlp.forward(&input).unwrap();
 

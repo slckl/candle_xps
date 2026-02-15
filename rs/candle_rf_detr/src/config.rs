@@ -114,13 +114,23 @@ pub struct RfDetrConfig {
     pub seg_downsample_ratio: usize,
 }
 
-impl Default for RfDetrConfig {
-    fn default() -> Self {
-        Self::small()
-    }
-}
-
 impl RfDetrConfig {
+    /// Get the number of feature levels from the projector scales
+    pub fn num_feature_levels(&self) -> usize {
+        self.projector_scale.len()
+    }
+
+    /// Get the number of encoder layers (from DINOv2, typically 12)
+    pub fn num_encoder_layers(&self) -> usize {
+        // DINOv2 small/base both have 12 layers
+        12
+    }
+
+    /// Calculate the feature map size at P4 scale for the given resolution
+    pub fn feature_map_size(&self) -> usize {
+        self.resolution / self.patch_size
+    }
+
     /// Create configuration for RF-DETR Nano model
     pub fn nano() -> Self {
         Self {
@@ -496,21 +506,5 @@ impl RfDetrConfig {
             seg_num_blocks: 6,
             seg_downsample_ratio: 4,
         }
-    }
-
-    /// Get the number of feature levels from the projector scales
-    pub fn num_feature_levels(&self) -> usize {
-        self.projector_scale.len()
-    }
-
-    /// Get the number of encoder layers (from DINOv2, typically 12)
-    pub fn num_encoder_layers(&self) -> usize {
-        // DINOv2 small/base both have 12 layers
-        12
-    }
-
-    /// Calculate the feature map size at P4 scale for the given resolution
-    pub fn feature_map_size(&self) -> usize {
-        self.resolution / self.patch_size
     }
 }

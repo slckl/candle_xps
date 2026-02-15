@@ -1,14 +1,5 @@
-//! DINOv2 with Windowed Attention Backbone for RF-DETR
-//!
-//! This module implements the DINOv2 vision transformer backbone with windowed attention,
-//! as used in RF-DETR for efficient object detection. The implementation supports both
-//! "small" (384 hidden dim) and "base" (768 hidden dim) variants.
-//!
-//! Key features:
-//! - Windowed attention for efficiency (configurable number of windows)
-//! - Multi-scale feature extraction at specified layer outputs
-//! - Layer scaling for stable training
-//! - Optional register tokens (not used in RF-DETR small)
+//! DINOv2 with Windowed Attention Backbone for RF-DETR.
+//! Supports 2 variants: DINOv2-Small (384 hidden dim) and DINOv2-Base (768 hidden dim).
 
 use candle_core::{DType, IndexOp, Result, Tensor, D};
 use candle_nn::{layer_norm, Conv2d, Conv2dConfig, LayerNorm, Linear, Module, VarBuilder};

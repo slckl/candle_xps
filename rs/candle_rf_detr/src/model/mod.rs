@@ -1,4 +1,4 @@
-pub mod dino2;
+pub mod dino2w;
 pub mod pos_enc;
 pub mod projector;
 pub mod query_embed;
@@ -9,12 +9,12 @@ use candle_core::{Device, Module, Result, Tensor};
 use candle_nn::{linear, Linear, VarBuilder};
 
 use crate::config::RfDetrConfig;
-use crate::model::dino2::{Dinov2Backbone, Dinov2Config};
+use crate::model::dino2w::{Dinov2Backbone, Dinov2Config};
 use crate::model::pos_enc::PositionEmbeddingSine;
 use crate::model::projector::{MultiScaleProjector, ProjectorConfig};
 use crate::model::query_embed::QueryEmbeddings;
 use crate::model::segmentation_head::{SegmentationHead, SegmentationHeadConfig};
-use crate::model::transformer::{Mlp, Transformer};
+use crate::model::transformer::{BboxMlp, Transformer};
 
 /// RF-DETR Object Detection/Instance Segmentation Model
 ///
@@ -36,7 +36,7 @@ pub struct RfDetr {
     /// Class embedding head
     class_embed: Linear,
     /// Bbox embedding head
-    bbox_embed: Mlp,
+    bbox_embed: BboxMlp,
     /// Optional segmentation head
     segmentation_head: Option<SegmentationHead>,
 }
@@ -68,22 +68,15 @@ impl RfDetr {
         // Load projector
         // Weight path: backbone.0.projector.*
         // Use different config based on scale factors
-        let projector_config = if config.projector_scale.len() == 1
-            && config.projector_scale[0] == crate::config::ProjectorScale::P4
-        {
-            // Small/Medium/Nano: single scale at P4 (scale_factor=1.0)
-            ProjectorConfig::small(
-                config.hidden_dim,
-                dino_config.hidden_size,
-                config.out_feature_indexes.len(),
-            )
-        } else {
-            // Large: P3+P5 (scale_factors=[2.0, 0.5])
-            ProjectorConfig::large(
-                config.hidden_dim,
-                dino_config.hidden_size,
-                config.out_feature_indexes.len(),
-            )
+        let projector_config = ProjectorConfig {
+            in_channels: vec![dino_config.hidden_size; config.out_feature_indexes.len()],
+            out_channels: config.hidden_dim,
+            scale_factors: config
+                .projector_scale
+                .iter()
+                .map(|s| s.scale_factor())
+                .collect(),
+            num_blocks: 3,
         };
         let projector =
             MultiScaleProjector::load(vb.pp("backbone.0.projector"), &projector_config)?;
@@ -124,7 +117,7 @@ impl RfDetr {
 
         // Load bbox_embed
         // Weight path: bbox_embed.*
-        let bbox_embed = Mlp::load(
+        let bbox_embed = BboxMlp::load(
             config.hidden_dim,
             config.hidden_dim,
             4,
