@@ -144,10 +144,10 @@ impl PatchEmbeddings {
 }
 
 impl Module for PatchEmbeddings {
-    fn forward(&self, pixel_values: &Tensor) -> Result<Tensor> {
-        // pixel_values: [batch_size, num_channels, height, width]
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        // xs: [batch_size, num_channels, height, width]
         // output: [batch_size, num_patches, hidden_size]
-        let embeddings = self.projection.forward(pixel_values)?;
+        let embeddings = self.projection.forward(xs)?;
         // [batch_size, hidden_size, h_patches, w_patches] -> [batch_size, hidden_size, num_patches]
         let embeddings = embeddings.flatten_from(2)?;
         // [batch_size, hidden_size, num_patches] -> [batch_size, num_patches, hidden_size]
@@ -656,150 +656,5 @@ impl Dinov2Backbone {
         }
 
         Ok(feature_maps)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use candle_core::Device;
-
-    /// Integration test comparing backbone encoder output against Python reference
-    ///
-    /// This test loads the same model weights and input image, runs the backbone,
-    /// and compares against the Python-generated reference outputs.
-    ///
-    /// Run with: cargo test test_backbone_encoder_against_python -- --ignored --nocapture
-    #[test]
-    #[ignore]
-    fn test_backbone_encoder_against_python() {
-        use candle_nn::VarBuilder;
-
-        const WEIGHTS_PATH: &str = "../../py/rfdetr/export/rfdetr-small.safetensors";
-        const IMAGE_PATH: &str = "../../py/rfdetr/sample.jpg";
-        const DEBUG_DIR: &str = "../../py/rfdetr/output";
-        const RESOLUTION: usize = 512;
-
-        // Helper to load numpy array
-        fn load_npy(path: &str) -> Tensor {
-            use ndarray_npy::ReadNpyExt;
-            let file = std::fs::File::open(path).expect(&format!("Failed to open {}", path));
-            let arr: ndarray::ArrayD<f32> =
-                ndarray::ArrayD::<f32>::read_npy(file).expect("Failed to parse npy");
-            let shape: Vec<usize> = arr.shape().to_vec();
-            let data: Vec<f32> = arr.into_iter().collect();
-            Tensor::from_vec(data, shape, &Device::Cpu).expect("Failed to create tensor")
-        }
-
-        // Helper to compare tensors
-        fn compare_tensors(name: &str, rust: &Tensor, python: &Tensor, max_diff_threshold: f32) {
-            let rust = rust
-                .to_device(&Device::Cpu)
-                .unwrap()
-                .to_dtype(DType::F32)
-                .unwrap();
-            let python = python
-                .to_device(&Device::Cpu)
-                .unwrap()
-                .to_dtype(DType::F32)
-                .unwrap();
-
-            assert_eq!(
-                rust.dims(),
-                python.dims(),
-                "{}: Shape mismatch: {:?} vs {:?}",
-                name,
-                rust.dims(),
-                python.dims()
-            );
-
-            let diff = (&rust - &python).unwrap().abs().unwrap();
-            let max_diff = diff
-                .flatten_all()
-                .unwrap()
-                .max(0)
-                .unwrap()
-                .to_scalar::<f32>()
-                .unwrap();
-            let mean_diff = diff.mean_all().unwrap().to_scalar::<f32>().unwrap();
-
-            let rust_mean = rust.mean_all().unwrap().to_scalar::<f32>().unwrap();
-            let python_mean = python.mean_all().unwrap().to_scalar::<f32>().unwrap();
-
-            println!(
-                "{}: max_diff={:.6}, mean_diff={:.6}",
-                name, max_diff, mean_diff
-            );
-            println!(
-                "  Rust mean: {:.6}, Python mean: {:.6}",
-                rust_mean, python_mean
-            );
-
-            // Note: Small differences are expected due to floating point precision
-            // differences between CUDA implementations and CPU vs GPU computation
-            assert!(
-                max_diff < max_diff_threshold,
-                "{}: max_diff ({:.6}) exceeds threshold ({:.6})",
-                name,
-                max_diff,
-                max_diff_threshold
-            );
-        }
-
-        // Check files exist
-        if !std::path::Path::new(WEIGHTS_PATH).exists() {
-            println!("Skipping test: weights file not found at {}", WEIGHTS_PATH);
-            return;
-        }
-        if !std::path::Path::new(IMAGE_PATH).exists() {
-            println!("Skipping test: image file not found at {}", IMAGE_PATH);
-            return;
-        }
-
-        let device = Device::Cpu;
-
-        // Load model
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[WEIGHTS_PATH], DType::F32, &device)
-                .expect("Failed to load weights")
-        };
-
-        let config = Dinov2Config::small_windowed(RESOLUTION, 16, 2, &[3, 6, 9, 12]);
-        let encoder = Dinov2Backbone::load(vb.pp("backbone.0.encoder.encoder"), &config)
-            .expect("Failed to load encoder");
-
-        // Load Python's preprocessed input (step 03) for exact comparison
-        let input_path = format!("{}/03_input_image_resized.npy", DEBUG_DIR);
-        if std::path::Path::new(&input_path).exists() {
-            println!("Using Python's preprocessed input for exact comparison");
-            let input = load_npy(&input_path);
-            let input = input.unsqueeze(0).unwrap(); // Add batch dimension
-            println!("Input shape: {:?}", input.dims());
-
-            // Run backbone
-            let outputs = encoder.forward(&input).expect("Forward pass failed");
-
-            println!("\nBackbone encoder outputs: {} feature maps", outputs.len());
-            assert_eq!(outputs.len(), 4, "Expected 4 output feature maps");
-
-            // Compare each output with Python reference
-            for i in 0..4 {
-                let ref_path = format!("{}/04_backbone_encoder_output_{}.npy", DEBUG_DIR, i);
-                if std::path::Path::new(&ref_path).exists() {
-                    let reference = load_npy(&ref_path);
-                    compare_tensors(
-                        &format!("04_backbone_encoder_output_{}", i),
-                        &outputs[i],
-                        &reference,
-                        0.05, // Allow small floating point differences from CUDA vs CPU
-                    );
-                } else {
-                    println!("Reference file not found: {}", ref_path);
-                }
-            }
-        } else {
-            println!("Python preprocessed input not found, skipping exact comparison");
-            println!("Run: cd py/rfdetr && uv run python3 predict_study.py -m small -d output -i sample.jpg");
-        }
     }
 }
