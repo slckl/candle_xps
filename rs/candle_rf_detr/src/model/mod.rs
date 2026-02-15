@@ -199,8 +199,7 @@ impl RfDetr {
         let (decoder_hs, decoder_ref, _encoder_hs, _encoder_ref) = self.transformer.forward(
             &projector_outputs,
             &position_encodings,
-            &self.query_embeddings.refpoint_embed,
-            &self.query_embeddings.query_feat,
+            &self.query_embeddings,
         )?;
 
         // Steps 13-17: Class and bbox predictions

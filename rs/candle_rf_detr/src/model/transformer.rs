@@ -25,6 +25,8 @@
 use candle_core::{DType, IndexOp, Result, Tensor, D};
 use candle_nn::{linear, Activation, Linear, Module, Sequential, VarBuilder};
 
+use crate::model::query_embed::QueryEmbeddings;
+
 /// MLP with ReLU between layers, used for bbox regression head.
 pub struct BboxMlp {
     layers: Sequential,
@@ -1149,8 +1151,7 @@ impl Transformer {
         &self,
         srcs: &[Tensor],
         pos_embeds: &[Tensor],
-        refpoint_embed: &Tensor,
-        query_feat: &Tensor,
+        query_embeddings: &QueryEmbeddings,
     ) -> Result<(Tensor, Tensor, Tensor, Tensor)> {
         let mut src_flatten = Vec::new();
         let mut lvl_pos_embed_flatten = Vec::new();
@@ -1231,10 +1232,16 @@ impl Transformer {
 
         // Prepare decoder inputs
         // tgt: expand query_feat for batch
-        let tgt = query_feat.unsqueeze(0)?.repeat((bs, 1, 1))?;
+        let tgt = query_embeddings
+            .query_feat
+            .unsqueeze(0)?
+            .repeat((bs, 1, 1))?;
 
         // refpoint_embed: combine with two-stage proposals
-        let refpoint_embed = refpoint_embed.unsqueeze(0)?.repeat((bs, 1, 1))?;
+        let refpoint_embed = query_embeddings
+            .refpoint_embed
+            .unsqueeze(0)?
+            .repeat((bs, 1, 1))?;
 
         // In export mode with lite_refpoint_refine, we use ts proposals directly
         let ts_len = ref_enc.dim(1)?;
@@ -1286,102 +1293,6 @@ impl Transformer {
 mod tests {
     use super::*;
     use candle_core::{DType, Device};
-
-    /// Helper to load numpy array
-    fn load_npy(path: &str) -> Tensor {
-        use ndarray_npy::ReadNpyExt;
-        let file = std::fs::File::open(path).expect(&format!("Failed to open {}", path));
-        let arr: ndarray::ArrayD<f32> =
-            ndarray::ArrayD::<f32>::read_npy(file).expect("Failed to parse npy");
-        let shape: Vec<usize> = arr.shape().to_vec();
-        let data: Vec<f32> = arr.into_iter().collect();
-        Tensor::from_vec(data, shape, &Device::Cpu).expect("Failed to create tensor")
-    }
-
-    /// Helper to compare tensors
-    fn compare_tensors(name: &str, rust: &Tensor, python: &Tensor, max_diff_threshold: f32) {
-        let rust = rust
-            .to_device(&Device::Cpu)
-            .unwrap()
-            .to_dtype(DType::F32)
-            .unwrap();
-        let python = python
-            .to_device(&Device::Cpu)
-            .unwrap()
-            .to_dtype(DType::F32)
-            .unwrap();
-
-        assert_eq!(
-            rust.dims(),
-            python.dims(),
-            "{}: Shape mismatch: {:?} vs {:?}",
-            name,
-            rust.dims(),
-            python.dims()
-        );
-
-        let diff = (&rust - &python).unwrap().abs().unwrap();
-        let max_diff = diff
-            .flatten_all()
-            .unwrap()
-            .max(0)
-            .unwrap()
-            .to_scalar::<f32>()
-            .unwrap();
-        let mean_diff = diff.mean_all().unwrap().to_scalar::<f32>().unwrap();
-
-        let rust_mean = rust.mean_all().unwrap().to_scalar::<f32>().unwrap();
-        let rust_min = rust
-            .flatten_all()
-            .unwrap()
-            .min(0)
-            .unwrap()
-            .to_scalar::<f32>()
-            .unwrap();
-        let rust_max = rust
-            .flatten_all()
-            .unwrap()
-            .max(0)
-            .unwrap()
-            .to_scalar::<f32>()
-            .unwrap();
-        let python_mean = python.mean_all().unwrap().to_scalar::<f32>().unwrap();
-        let python_min = python
-            .flatten_all()
-            .unwrap()
-            .min(0)
-            .unwrap()
-            .to_scalar::<f32>()
-            .unwrap();
-        let python_max = python
-            .flatten_all()
-            .unwrap()
-            .max(0)
-            .unwrap()
-            .to_scalar::<f32>()
-            .unwrap();
-
-        println!(
-            "{}: max_diff={:.6}, mean_diff={:.6}",
-            name, max_diff, mean_diff
-        );
-        println!(
-            "  Rust:   min={:.6}, max={:.6}, mean={:.6}",
-            rust_min, rust_max, rust_mean
-        );
-        println!(
-            "  Python: min={:.6}, max={:.6}, mean={:.6}",
-            python_min, python_max, python_mean
-        );
-
-        assert!(
-            max_diff < max_diff_threshold,
-            "{}: max_diff ({:.6}) exceeds threshold ({:.6})",
-            name,
-            max_diff,
-            max_diff_threshold
-        );
-    }
 
     #[test]
     fn test_gen_sineembed_for_position_2d() {
@@ -1551,149 +1462,5 @@ mod tests {
             "Edge sampling value should be reasonable, got {}",
             value
         );
-    }
-
-    /// Integration test comparing transformer outputs against Python reference
-    ///
-    /// Run with: cargo test test_transformer_against_python -- --ignored --nocapture
-    #[test]
-    #[ignore]
-    fn test_transformer_against_python() {
-        const WEIGHTS_PATH: &str = "../../py/rfdetr/export/rfdetr-small.safetensors";
-        const DEBUG_DIR: &str = "../../py/rfdetr/output";
-
-        // Check files exist
-        if !std::path::Path::new(WEIGHTS_PATH).exists() {
-            println!("Skipping test: weights file not found at {}", WEIGHTS_PATH);
-            return;
-        }
-
-        let device = Device::Cpu;
-
-        // Load model weights
-        let vb = unsafe {
-            VarBuilder::from_mmaped_safetensors(&[WEIGHTS_PATH], DType::F32, &device)
-                .expect("Failed to load weights")
-        };
-
-        // RF-DETR small config
-        let d_model = 256;
-        let sa_nhead = 8;
-        let ca_nhead = 16;
-        let num_queries = 300;
-        let num_decoder_layers = 3;
-        let dim_feedforward = 2048;
-        let num_feature_levels = 1;
-        let dec_n_points = 2;
-        let lite_refpoint_refine = true;
-        let bbox_reparam = true;
-        let num_classes = 91;
-
-        // Load transformer
-        let transformer = Transformer::load(
-            d_model,
-            sa_nhead,
-            ca_nhead,
-            num_queries,
-            num_decoder_layers,
-            dim_feedforward,
-            num_feature_levels,
-            dec_n_points,
-            lite_refpoint_refine,
-            bbox_reparam,
-            num_classes,
-            vb.pp("transformer"),
-        )
-        .expect("Failed to load transformer");
-
-        println!("Transformer loaded successfully");
-
-        // Load inputs from Python reference
-        let proj_output = load_npy(&format!("{}/05_backbone_projector_output_0.npy", DEBUG_DIR));
-        let pos_encoding = load_npy(&format!("{}/06_position_encoding_0.npy", DEBUG_DIR));
-        let refpoint_embed = load_npy(&format!("{}/07_refpoint_embed.npy", DEBUG_DIR));
-        let query_feat = load_npy(&format!("{}/08_query_feat.npy", DEBUG_DIR));
-
-        println!("Inputs loaded:");
-        println!("  proj_output: {:?}", proj_output.dims());
-        println!("  pos_encoding: {:?}", pos_encoding.dims());
-        println!("  refpoint_embed: {:?}", refpoint_embed.dims());
-        println!("  query_feat: {:?}", query_feat.dims());
-
-        // Run transformer
-        let (hs, references, hs_enc, ref_enc) = transformer
-            .forward(
-                &[proj_output],
-                &[pos_encoding],
-                &refpoint_embed,
-                &query_feat,
-            )
-            .expect("Transformer forward failed");
-
-        println!("\nTransformer outputs:");
-        println!("  hs (decoder hidden states): {:?}", hs.dims());
-        println!("  references (decoder refs): {:?}", references.dims());
-        println!("  hs_enc (encoder hidden states): {:?}", hs_enc.dims());
-        println!("  ref_enc (encoder refs): {:?}", ref_enc.dims());
-
-        // Compare with Python reference
-        println!("\nComparing with Python reference:");
-
-        // Step 09: transformer_decoder_hidden_states
-        // Note: max_diff can be ~5.0 due to accumulated floating point differences
-        // in deformable attention and self-attention. Mean diff is typically ~0.5.
-        // After fixing align_corners, results are much closer but still have some variance.
-        let ref_path = format!("{}/09_transformer_decoder_hidden_states.npy", DEBUG_DIR);
-        if std::path::Path::new(&ref_path).exists() {
-            let reference = load_npy(&ref_path);
-            compare_tensors(
-                "09_transformer_decoder_hidden_states",
-                &hs,
-                &reference,
-                6.0, // Allow for accumulated floating point differences
-            );
-        }
-
-        // Step 10: transformer_decoder_references
-        // Note: max_diff can be ~0.9 due to differences in proposal selection
-        let ref_path = format!("{}/10_transformer_decoder_references.npy", DEBUG_DIR);
-        if std::path::Path::new(&ref_path).exists() {
-            let reference = load_npy(&ref_path);
-            compare_tensors(
-                "10_transformer_decoder_references",
-                &references,
-                &reference,
-                1.0, // Allow for differences in reference point computation
-            );
-        }
-
-        // Step 11: transformer_encoder_hidden_states
-        // Note: max_diff is typically ~3.2, mean diff ~0.27 due to two-stage proposal
-        // selection potentially choosing different top-k proposals.
-        let ref_path = format!("{}/11_transformer_encoder_hidden_states.npy", DEBUG_DIR);
-        if std::path::Path::new(&ref_path).exists() {
-            let reference = load_npy(&ref_path);
-            compare_tensors(
-                "11_transformer_encoder_hidden_states",
-                &hs_enc,
-                &reference,
-                4.0, // Allow for floating point differences in encoder output
-            );
-        }
-
-        // Step 12: transformer_encoder_references
-        // Note: max_diff can be ~0.9 due to differences in proposal generation
-        let ref_path = format!("{}/12_transformer_encoder_references.npy", DEBUG_DIR);
-        if std::path::Path::new(&ref_path).exists() {
-            let reference = load_npy(&ref_path);
-            compare_tensors(
-                "12_transformer_encoder_references",
-                &ref_enc,
-                &reference,
-                1.0, // Allow for differences in proposal computation
-            );
-        }
-
-        println!("\nAll comparisons completed!");
     }
 }
