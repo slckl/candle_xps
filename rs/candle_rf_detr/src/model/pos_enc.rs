@@ -29,7 +29,7 @@ pub struct PositionEmbeddingSineConfig {
 
 impl PositionEmbeddingSineConfig {
     /// Create default config for RF-DETR
-    pub fn new(hidden_dim: usize) -> Self {
+    pub fn rfdetr_default(hidden_dim: usize) -> Self {
         Self {
             num_pos_feats: hidden_dim / 2,
             temperature: 10000.0,
@@ -53,9 +53,8 @@ impl PositionEmbeddingSine {
         Self { config }
     }
 
-    /// Create position embedding for RF-DETR with default config
     pub fn for_rf_detr(hidden_dim: usize) -> Self {
-        Self::new(PositionEmbeddingSineConfig::new(hidden_dim))
+        Self::new(PositionEmbeddingSineConfig::rfdetr_default(hidden_dim))
     }
 
     /// Compute position encoding for a feature map
@@ -81,11 +80,11 @@ impl PositionEmbeddingSine {
 
         // Compute cumulative sum for y positions (along height dimension)
         // y_embed[b, i, j] = i + 1 (1-indexed row position, same for all columns)
-        let y_embed = self.cumsum_2d(&not_mask, 1)?;
+        let y_embed = not_mask.cumsum(1)?;
 
         // Compute cumulative sum for x positions (along width dimension)
         // x_embed[b, i, j] = j + 1 (1-indexed column position, same for all rows)
-        let x_embed = self.cumsum_2d(&not_mask, 2)?;
+        let x_embed = not_mask.cumsum(2)?;
 
         // Normalize if configured
         let (y_embed, x_embed) = if self.config.normalize {
@@ -126,34 +125,6 @@ impl PositionEmbeddingSine {
 
         // Permute to [B, C, H, W] format
         pos.permute((0, 3, 1, 2))
-    }
-
-    /// Compute cumulative sum along a dimension
-    fn cumsum_2d(&self, tensor: &Tensor, dim: usize) -> Result<Tensor> {
-        let shape = tensor.dims();
-        let size = shape[dim];
-
-        // Create indices for the cumsum
-        // For dim=1 (height): we want [1, 2, 3, ..., H] repeated across width
-        // For dim=2 (width): we want [1, 2, 3, ..., W] repeated across height
-        let indices: Vec<f32> = (1..=size).map(|i| i as f32).collect();
-        let indices = Tensor::from_vec(indices, size, tensor.device())?;
-
-        match dim {
-            1 => {
-                // Reshape to [1, H, 1] and broadcast to [B, H, W]
-                let indices = indices.reshape((1, size, 1))?;
-                indices.broadcast_as(shape)
-            }
-            2 => {
-                // Reshape to [1, 1, W] and broadcast to [B, H, W]
-                let indices = indices.reshape((1, 1, size))?;
-                indices.broadcast_as(shape)
-            }
-            _ => {
-                candle_core::bail!("cumsum_2d only supports dim 1 or 2")
-            }
-        }
     }
 
     /// Create the dimension tensor for frequency scaling

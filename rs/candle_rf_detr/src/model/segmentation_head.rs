@@ -111,20 +111,22 @@ impl MLPBlock {
 
         Ok(Self { norm_in, fc1, fc2 })
     }
+}
 
-    pub fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let input = x.clone();
+impl Module for MLPBlock {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let input = xs.clone();
 
         // LayerNorm
-        let x = self.norm_in.forward(x)?;
+        let xs = self.norm_in.forward(xs)?;
 
         // Linear -> GELU -> Linear
-        let x = self.fc1.forward(&x)?;
-        let x = x.gelu_erf()?;
-        let x = self.fc2.forward(&x)?;
+        let xs = self.fc1.forward(&xs)?;
+        let xs = xs.gelu_erf()?;
+        let xs = self.fc2.forward(&xs)?;
 
         // Residual
-        x.add(&input)
+        xs.add(&input)
     }
 }
 
@@ -187,8 +189,6 @@ impl SegmentationHead {
         })
     }
 
-    /// Forward pass for inference
-    ///
     /// # Arguments
     /// * `spatial_features` - Feature map from backbone, shape [B, C, H, W]
     /// * `query_features` - Query embeddings from decoder, shape [B, N, C]
